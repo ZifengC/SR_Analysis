@@ -1,0 +1,44 @@
+# OS and editor noise
+.DS_Store
+**/.DS_Store
+.vscode/
+**/.vscode/
+.idea/
+**/.idea/
+
+# Python bytecode and caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+.conda/
+
+# Data and generated artifacts
+Data/
+**/output/
+**/output_ablation/
+**/intermediate/
+**/cache/
+**/New_results/
+**/figures/
+
+# Data files
+*.pkl
+*.csv
+*.tsv
+*.npy
+*.npz
+*.parquet
+*.feather
+*.joblib
+*.h5
+*.hdf5
+*.bin
+*.pt
+*.pth
+

@@ -1,0 +1,678 @@
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+from typing import Iterable
+
+import numpy as np
+import pandas as pd
+
+os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/matplotlib-cache")
+import matplotlib.pyplot as plt
+
+
+VARIANT_LABELS = {
+    "full": "Full",
+    "no_intent_state": "w/o state + temp",
+    "no_counterfactual": "w/o attribution",
+}
+VARIANT_COLORS = {
+    "full": "#1f77b4",
+    "no_intent_state": "#ff7f0e",
+    "no_counterfactual": "#2ca02c",
+}
+STATE_VARIANTS = ["full", "no_intent_state"]
+ATTR_VARIANTS = ["full", "no_counterfactual"]
+TRANSITION_ORDER = ["R->R", "R->S", "S->R", "S->S"]
+TRANSITION_METRICS = [
+    "intent_shift",
+    "adoption_rate",
+    "future_consistency",
+    "cross_channel_gain",
+]
+TRANSITION_PLOT_METRIC = "intent_shift"
+EXPLORATION_BIN_COUNT = 10
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_INPUT_ROOT = SCRIPT_DIR.parent
+DEFAULT_OUTPUT_ROOT = SCRIPT_DIR.parent / "output_ablation"
+DEFAULT_RAW_TRAJECTORY = SCRIPT_DIR.parent / "output" / "raw_trajectory" / "raw_trajectory.csv"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Ablation analysis for PC-SAR exports.")
+    parser.add_argument(
+        "--input-root",
+        type=str,
+        default=str(DEFAULT_INPUT_ROOT),
+        help="Directory containing the exported CSVs.",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=str,
+        default=str(DEFAULT_OUTPUT_ROOT),
+        help="Directory to write ablation tables and figures.",
+    )
+    parser.add_argument(
+        "--raw-trajectory",
+        type=str,
+        default=str(DEFAULT_RAW_TRAJECTORY),
+        help="Optional raw trajectory CSV used to relabel transitions.",
+    )
+    return parser.parse_args()
+
+
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def safe_cosine(a: np.ndarray, b: np.ndarray) -> float:
+    a = np.asarray(a, dtype=np.float64).reshape(-1)
+    b = np.asarray(b, dtype=np.float64).reshape(-1)
+    if a.size == 0 or b.size == 0:
+        return float("nan")
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom <= 1e-12:
+        return float("nan")
+    return float(np.dot(a, b) / denom)
+
+
+def sem(values: pd.Series | np.ndarray) -> float:
+    series = pd.Series(values).dropna()
+    return float(series.std(ddof=1) / np.sqrt(len(series))) if len(series) > 1 else 0.0
+
+
+def mean_or_nan(values: pd.Series | np.ndarray) -> float:
+    series = pd.Series(values).dropna()
+    return float(series.mean()) if len(series) > 0 else float("nan")
+
+
+def resolve_variant(path: Path) -> str | None:
+    stem = path.stem
+    if stem.endswith("old"):
+        return None
+    if stem.endswith("full"):
+        return "full"
+    if stem.endswith("no_intent_state"):
+        return "no_intent_state"
+    if stem.endswith("no_counterfactual"):
+        return "no_counterfactual"
+    return None
+
+
+def discover_variant_files(root: Path) -> dict[str, Path]:
+    variant_files: dict[str, Path] = {}
+    for path in sorted(root.glob("pcsar_intent_features_test*.csv")):
+        variant = resolve_variant(path)
+        if variant is not None:
+            variant_files[variant] = path
+    return variant_files
+
+
+def coerce_numeric(df: pd.DataFrame, cols: Iterable[str]) -> pd.DataFrame:
+    for col in cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def prepare_frame(df: pd.DataFrame) -> pd.DataFrame:
+    numeric_cols = [
+        "sample_index",
+        "user_id",
+        "timestamp",
+        "history_length",
+        "global_history_length",
+        "rec_history_length",
+        "src_history_length",
+        "history_rec_share",
+        "history_src_share",
+        "global_dominant_intent_prob",
+        "global_intent_entropy",
+        "global_posterior_uncertainty",
+        "global_belief_uncertainty_mean",
+        "global_belief_confidence_mean",
+        "global_attention_temp_mean",
+        "rec_dominant_intent_prob",
+        "rec_intent_entropy",
+        "rec_posterior_uncertainty",
+        "rec_belief_uncertainty_mean",
+        "rec_belief_confidence_mean",
+        "rec_attention_temp_mean",
+        "src_dominant_intent_prob",
+        "src_intent_entropy",
+        "src_posterior_uncertainty",
+        "src_belief_uncertainty_mean",
+        "src_belief_confidence_mean",
+        "src_attention_temp_mean",
+        "attribution_confidence_gap",
+        "attribution_entropy_gap",
+        "rec_src_intent_shift_dot",
+        "rec_src_intent_shift_js",
+        "rec_pred_top1_score",
+        "rec_pred_pos_score",
+        "rec_pred_pos_rank",
+        "src_pred_top1_score",
+        "src_pred_pos_score",
+        "src_pred_pos_rank",
+        "use_counterfactual",
+        "use_intent_logit_bias",
+        "use_uncertainty_attention",
+    ]
+    df = df.copy()
+    df = coerce_numeric(df, numeric_cols)
+    sort_cols = ["user_id"]
+    if "timestamp" in df.columns:
+        sort_cols.append("timestamp")
+    if "sample_index" in df.columns:
+        sort_cols.append("sample_index")
+    df = df.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
+    return df
+
+
+def vector_columns(df: pd.DataFrame, prefix: str) -> list[str]:
+    cols = [c for c in df.columns if c.startswith(prefix)]
+
+    def suffix_value(name: str) -> int:
+        try:
+            return int(name.split("_")[-1])
+        except ValueError:
+            return 10**9
+
+    return sorted(cols, key=suffix_value)
+
+
+def row_vector(row: pd.Series, cols: list[str]) -> np.ndarray:
+    if not cols:
+        return np.array([], dtype=np.float64)
+    return row[cols].to_numpy(dtype=np.float64)
+
+
+def row_cos(row_a: pd.Series, row_b: pd.Series, cols_a: list[str], cols_b: list[str] | None = None) -> float:
+    if cols_b is None:
+        cols_b = cols_a
+    return safe_cosine(row_vector(row_a, cols_a), row_vector(row_b, cols_b))
+
+
+def build_state_events(base_df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for user_id, g in base_df.groupby("user_id", sort=False):
+        g = g.reset_index(drop=True)
+        if len(g) < 2:
+            continue
+
+        if "channel" in g.columns and (g["channel"].astype(str).str.upper() == "S").any():
+            candidates = g[g["channel"].astype(str).str.upper() == "S"].copy()
+        else:
+            candidates = g.copy()
+
+        score = (
+            candidates["history_src_share"].fillna(0.0)
+            + 0.25 * candidates["global_intent_entropy"].fillna(0.0)
+            + 0.25 * candidates["global_posterior_uncertainty"].fillna(0.0)
+        )
+        shock_pos = int(score.idxmax())
+        post_candidates = g.iloc[shock_pos + 1 :]
+        post_candidates = post_candidates[post_candidates["channel"].astype(str).str.upper() == "R"]
+        if post_candidates.empty:
+            continue
+        post_pos = int(post_candidates.index[0])
+
+        shock = g.iloc[shock_pos]
+        post = g.iloc[post_pos]
+        rows.append(
+            {
+                "user_id": int(user_id),
+                "shock_sample_index": int(shock["sample_index"]),
+                "post_sample_index": int(post["sample_index"]),
+                "shock_channel": str(shock["channel"]),
+                "post_channel": str(post["channel"]),
+                "shock_score": float(score.loc[shock_pos]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_transition_events(base_df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for user_id, g in base_df.groupby("user_id", sort=False):
+        g = g.reset_index(drop=True)
+        if len(g) < 2:
+            continue
+        last_seen: dict[str, int | None] = {"R": None, "S": None}
+        for i in range(len(g)):
+            cur = g.iloc[i]
+            cur_channel = str(cur["channel"]).upper()
+            if cur_channel not in {"R", "S"}:
+                continue
+
+            future_index = int(g.iloc[i + 1]["sample_index"]) if i + 1 < len(g) else np.nan
+            exploration_score = float(
+                cur.get("history_src_share", 0.0)
+                + 0.25 * cur.get("global_intent_entropy", 0.0)
+                + 0.25 * cur.get("global_posterior_uncertainty", 0.0)
+            )
+
+            for anchor_channel in ("R", "S"):
+                anchor_index = last_seen[anchor_channel]
+                if anchor_index is None:
+                    continue
+                anchor_row = g.iloc[int(anchor_index)]
+                rows.append(
+                    {
+                        "user_id": int(user_id),
+                        "anchor_sample_index": int(anchor_row["sample_index"]),
+                        "sample_index": int(cur["sample_index"]),
+                        "future_sample_index": future_index,
+                        "anchor_channel": anchor_channel,
+                        "current_channel": cur_channel,
+                        "transition_type": f"{anchor_channel}->{cur_channel}",
+                        "exploration_score": exploration_score,
+                        "anchor_gap": int(i - int(anchor_index)),
+                    }
+                )
+
+            last_seen[cur_channel] = i
+    return pd.DataFrame(rows)
+
+
+def get_idx(df: pd.DataFrame) -> pd.DataFrame:
+    idx = df.set_index(["user_id", "sample_index"], drop=False)
+    return idx
+
+
+def get_row(idx: pd.DataFrame, user_id: int, sample_index: int) -> pd.Series | None:
+    key = (int(user_id), int(sample_index))
+    if key not in idx.index:
+        return None
+    row = idx.loc[key]
+    if isinstance(row, pd.DataFrame):
+        row = row.iloc[0]
+    return row
+
+
+def evaluate_state_events(events: pd.DataFrame, df: pd.DataFrame, variant: str) -> pd.DataFrame:
+    idx = get_idx(df)
+    rec_feat_cols = vector_columns(df, "rec_user_feat_")
+    hist_cols = vector_columns(df, "rec_history_mean_emb_")
+    topk_cols = vector_columns(df, "rec_topk_mean_emb_") or rec_feat_cols
+    shock_item_cols = vector_columns(df, "pos_item_emb_")
+
+    rows = []
+    for _, event in events.iterrows():
+        shock = get_row(idx, int(event["user_id"]), int(event["shock_sample_index"]))
+        post = get_row(idx, int(event["user_id"]), int(event["post_sample_index"]))
+        if shock is None or post is None:
+            continue
+
+        post_rec = row_vector(post, topk_cols)
+        shock_rec = row_vector(shock, topk_cols)
+        shock_item = row_vector(shock, shock_item_cols)
+        shock_history = row_vector(shock, hist_cols)
+        post_to_shock = safe_cosine(post_rec, shock_item)
+        post_to_history = safe_cosine(post_rec, shock_history)
+        shock_resistance = post_to_history - post_to_shock
+        preference_margin = post_to_history - safe_cosine(shock_rec, shock_item)
+
+        rows.append(
+            {
+                "variant": variant,
+                "user_id": int(event["user_id"]),
+                "shock_sample_index": int(event["shock_sample_index"]),
+                "post_sample_index": int(event["post_sample_index"]),
+                "shock_channel": event["shock_channel"],
+                "post_channel": event["post_channel"],
+                "shock_score": float(event["shock_score"]),
+                "post_to_shock": post_to_shock,
+                "post_to_history": post_to_history,
+                "shock_resistance": shock_resistance,
+                "preference_margin": preference_margin,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def evaluate_transition_events(events: pd.DataFrame, df: pd.DataFrame, variant: str) -> pd.DataFrame:
+    idx = get_idx(df)
+    shared_cols = vector_columns(df, "shared_user_feat_")
+
+    rows = []
+    for _, event in events.iterrows():
+        cur = get_row(idx, int(event["user_id"]), int(event["sample_index"]))
+        if cur is None:
+            continue
+        fut = None
+        if not pd.isna(event["future_sample_index"]):
+            fut = get_row(idx, int(event["user_id"]), int(event["future_sample_index"]))
+
+        shared_cur = row_vector(cur, shared_cols)
+        future_consistency = (
+            safe_cosine(shared_cur, row_vector(fut, shared_cols)) if fut is not None else np.nan
+        )
+
+        adoption_rate = float(
+            str(cur.get("attribution_source_proxy", "")).upper()
+            == str(cur.get("channel", "")).upper()
+        )
+        cross_channel_gain = float(cur.get("rec_pred_pos_score", np.nan)) - float(
+            cur.get("src_pred_pos_score", np.nan)
+        )
+
+        rows.append(
+            {
+                "variant": variant,
+                "user_id": int(event["user_id"]),
+                "sample_index": int(event["sample_index"]),
+                "timestamp": float(cur.get("timestamp", np.nan)),
+                "item_id": int(cur.get("item_id", -1)) if pd.notna(cur.get("item_id", np.nan)) else np.nan,
+                "search_session_id": int(cur.get("search_session_id", -1)) if pd.notna(cur.get("search_session_id", np.nan)) else np.nan,
+                "channel": str(cur.get("channel", "")).upper(),
+                "transition_type": event["transition_type"],
+                "exploration_score": float(event["exploration_score"]),
+                "intent_shift": float(cur.get("rec_src_intent_shift_js", np.nan)),
+                "adoption_rate": adoption_rate,
+                "future_consistency": future_consistency,
+                "cross_channel_gain": cross_channel_gain,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def attach_raw_transition_labels(transition_df: pd.DataFrame, raw_trajectory_path: Path) -> pd.DataFrame:
+    if not raw_trajectory_path.exists() or transition_df.empty:
+        transition_df = transition_df.copy()
+        transition_df["transition_type_plot"] = transition_df.get("transition_type", pd.Series(dtype=str))
+        return transition_df
+
+    raw = pd.read_csv(raw_trajectory_path, low_memory=False)
+    required = {"user_id", "timestamp", "channel"}
+    if not required.issubset(raw.columns):
+        transition_df = transition_df.copy()
+        transition_df["transition_type_plot"] = transition_df.get("transition_type", pd.Series(dtype=str))
+        return transition_df
+
+    raw = raw.copy()
+    raw["channel"] = raw["channel"].astype(str).str.upper()
+    raw["channel_order"] = raw["channel"].map({"R": 0, "S": 1}).fillna(99).astype(int)
+    raw["item_id_filled"] = pd.to_numeric(raw.get("item_id", np.nan), errors="coerce").fillna(-1).astype(int)
+    raw["search_session_id_filled"] = pd.to_numeric(
+        raw.get("search_session_id", np.nan), errors="coerce"
+    ).fillna(-1).astype(int)
+    raw = raw.sort_values(
+        ["user_id", "timestamp", "channel_order", "item_id_filled", "search_session_id_filled"],
+        kind="mergesort",
+    ).reset_index(drop=True)
+    raw["prev_channel"] = raw.groupby("user_id")["channel"].shift(1)
+    raw["raw_transition_type"] = raw["prev_channel"].fillna("") + "->" + raw["channel"]
+    raw = raw[raw["prev_channel"].notna()].copy()
+    raw = raw.rename(
+        columns={
+            "timestamp": "timestamp_raw",
+            "item_id_filled": "item_id_merge",
+            "search_session_id_filled": "search_session_id_merge",
+        }
+    )
+
+    merged = transition_df.copy()
+    merged["item_id_merge"] = pd.to_numeric(merged.get("item_id", np.nan), errors="coerce").fillna(-1).astype(int)
+    merged["search_session_id_merge"] = pd.to_numeric(
+        merged.get("search_session_id", np.nan), errors="coerce"
+    ).fillna(-1).astype(int)
+    merged["timestamp_merge"] = pd.to_numeric(merged.get("timestamp", np.nan), errors="coerce")
+
+    raw = raw[[
+        "user_id",
+        "timestamp_raw",
+        "item_id_merge",
+        "search_session_id_merge",
+        "channel",
+        "raw_transition_type",
+    ]]
+    merged = merged.merge(
+        raw,
+        on=["user_id", "item_id_merge", "search_session_id_merge", "channel"],
+        how="left",
+    )
+
+    matched = int(merged["raw_transition_type"].notna().sum())
+    total = int(len(merged))
+    if total > 0 and matched / total < 0.5:
+        print(f"[warn] raw transition relabel match rate low: {matched}/{total}")
+
+    merged["transition_type_plot"] = merged["raw_transition_type"].fillna(merged["transition_type"])
+    return merged
+
+
+def summarize(df: pd.DataFrame, group_cols: list[str], metrics: list[str]) -> pd.DataFrame:
+    rows = []
+    for keys, g in df.groupby(group_cols, sort=False):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        row = dict(zip(group_cols, keys))
+        row["n"] = int(len(g))
+        for metric in metrics:
+            row[f"{metric}_mean"] = mean_or_nan(g[metric])
+            row[f"{metric}_sem"] = sem(g[metric])
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def save_table(df: pd.DataFrame, path: Path) -> None:
+    ensure_dir(path.parent)
+    df.to_csv(path, index=False)
+
+
+def plot_state_summary(df: pd.DataFrame, out_path: Path) -> None:
+    ensure_dir(out_path.parent)
+    fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.6), constrained_layout=True)
+    metrics = [
+        ("shock_resistance", "Exploration resistance"),
+        ("preference_margin", "Post-exploration preference margin"),
+    ]
+
+    x = np.arange(len(STATE_VARIANTS))
+    labels = [VARIANT_LABELS[v] for v in STATE_VARIANTS]
+
+    for ax, (metric, title) in zip(axes, metrics):
+        means = []
+        sems = []
+        for variant in STATE_VARIANTS:
+            cur = df[df["variant"] == variant]
+            means.append(float(np.nanmean(cur[metric])) if not cur.empty else np.nan)
+            sems.append(sem(cur[metric]) if not cur.empty else np.nan)
+        ax.bar(x, means, color=[VARIANT_COLORS[v] for v in STATE_VARIANTS], alpha=0.88)
+        ax.errorbar(x, means, yerr=1.96 * np.asarray(sems), fmt="none", ecolor="#333333", capsize=4)
+        ax.scatter(x, means, s=24, color="#111111", zorder=3)
+        ax.set_xticks(x, labels)
+        ax.set_title(title, loc="left", fontsize=12, weight="bold")
+        ax.grid(axis="y", alpha=0.25)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    fig.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def assign_exploration_bins(df: pd.DataFrame, n_bins: int = EXPLORATION_BIN_COUNT) -> pd.DataFrame:
+    df = df.copy()
+    if df.empty:
+        df["exploration_bin"] = pd.Series(dtype=int)
+        return df
+
+    scores = df["exploration_score"].astype(float)
+    try:
+        bins = pd.qcut(scores.rank(method="first"), q=n_bins, labels=False, duplicates="drop")
+    except ValueError:
+        bins = pd.Series(np.zeros(len(df), dtype=int), index=df.index)
+
+    bins = pd.Series(bins, index=df.index).astype("Int64") + 1
+    if bins.notna().any():
+        bins = bins.fillna(int(bins.dropna().max()))
+    df["exploration_bin"] = bins.astype(int)
+    return df
+
+
+def summarize_binned_metric(
+    df: pd.DataFrame,
+    metric: str,
+    transition_col: str = "transition_type",
+) -> pd.DataFrame:
+    rows = []
+    for keys, g in df.groupby(["variant", transition_col, "exploration_bin"], sort=False):
+        variant, transition_type, exploration_bin = keys
+        rows.append(
+            {
+                "variant": variant,
+                "transition_type": transition_type,
+                "exploration_bin": int(exploration_bin),
+                "n": int(len(g)),
+                f"{metric}_mean": mean_or_nan(g[metric]),
+                f"{metric}_sem": sem(g[metric]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def plot_transition_summary(df: pd.DataFrame, out_path: Path) -> None:
+    ensure_dir(out_path.parent)
+    df = assign_exploration_bins(df)
+    transition_col = "transition_type_plot" if "transition_type_plot" in df.columns else "transition_type"
+    plot_df = summarize_binned_metric(df, TRANSITION_PLOT_METRIC, transition_col=transition_col)
+    fig, axes = plt.subplots(2, 2, figsize=(12.0, 8.4), sharex=True, constrained_layout=True)
+    axes = axes.flatten()
+
+    x_bins = np.arange(1, EXPLORATION_BIN_COUNT + 1)
+    transition_order = TRANSITION_ORDER if "R->R" in set(plot_df["transition_type"].astype(str).unique()) else [t for t in TRANSITION_ORDER if t != "R->R"]
+    for ax, transition_type in zip(axes, transition_order):
+        for variant in [v for v in plot_df["variant"].dropna().unique().tolist() if v in VARIANT_LABELS]:
+            g = plot_df[(plot_df["variant"] == variant) & (plot_df["transition_type"] == transition_type)]
+            if g.empty:
+                y = [np.nan] * len(x_bins)
+            else:
+                curve = (
+                    g.set_index("exploration_bin")[[f"{TRANSITION_PLOT_METRIC}_mean"]]
+                    .reindex(x_bins)
+                    .astype(float)
+                )
+                curve = curve.interpolate(method="linear", limit_direction="both")
+                y = curve[f"{TRANSITION_PLOT_METRIC}_mean"].to_numpy(dtype=float)
+            ax.plot(
+                x_bins,
+                y,
+                marker="o",
+                linewidth=2.1,
+                color=VARIANT_COLORS[variant],
+                label=VARIANT_LABELS[variant],
+            )
+
+        ax.set_title(transition_type, loc="left", fontsize=12, weight="bold")
+        ax.set_xticks(x_bins)
+        ax.set_xlabel("Exploration score bin")
+        ax.set_ylabel("Intent shift")
+        ax.grid(axis="y", alpha=0.25)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    axes[0].legend(frameon=False)
+    fig.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def build_transition_gap(df: pd.DataFrame, transition_col: str = "transition_type") -> pd.DataFrame:
+    rows = []
+    for variant, g in df.groupby("variant", sort=False):
+        if variant not in VARIANT_LABELS:
+            continue
+        pivot = summarize(g, [transition_col], TRANSITION_METRICS).set_index(transition_col)
+        for metric in TRANSITION_METRICS:
+            rs = float(pivot.loc["R->S", f"{metric}_mean"]) if "R->S" in pivot.index else np.nan
+            sr = float(pivot.loc["S->R", f"{metric}_mean"]) if "S->R" in pivot.index else np.nan
+            rows.append(
+                {
+                    "variant": variant,
+                    "metric": metric,
+                    "r_to_s_mean": rs,
+                    "s_to_r_mean": sr,
+                    "transition_gap": rs - sr if np.isfinite(rs) and np.isfinite(sr) else np.nan,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def validate_alignment(base_df: pd.DataFrame, other_df: pd.DataFrame, variant: str) -> None:
+    base_keys = set(zip(base_df["user_id"].tolist(), base_df["sample_index"].tolist()))
+    other_keys = set(zip(other_df["user_id"].tolist(), other_df["sample_index"].tolist()))
+    if base_keys != other_keys:
+        missing = len(base_keys - other_keys)
+        extra = len(other_keys - base_keys)
+        print(f"[warn] alignment mismatch for {variant}: missing={missing}, extra={extra}")
+
+
+def main() -> None:
+    args = parse_args()
+    input_root = Path(args.input_root)
+    output_root = Path(args.output_root)
+    ensure_dir(output_root)
+
+    variant_files = discover_variant_files(input_root)
+    required = {"full", "no_intent_state", "no_counterfactual"}
+    missing = sorted(required - set(variant_files))
+    if missing:
+        raise FileNotFoundError(f"Missing variant CSV(s): {missing}")
+
+    frames = {
+        variant: prepare_frame(pd.read_csv(path, low_memory=False))
+        for variant, path in variant_files.items()
+    }
+    base_df = frames["full"]
+    for variant, df in frames.items():
+        validate_alignment(base_df, df, variant)
+
+    state_events = build_state_events(base_df)
+    transition_events = build_transition_events(base_df)
+
+    state_tables = []
+    for variant in STATE_VARIANTS:
+        state_tables.append(evaluate_state_events(state_events, frames[variant], variant))
+    state_df = pd.concat(state_tables, ignore_index=True)
+    save_table(state_df, output_root / "state" / "state_shock_events.csv")
+    state_summary = summarize(
+        state_df,
+        ["variant"],
+        [
+            "post_to_shock",
+            "post_to_history",
+            "shock_resistance",
+            "preference_margin",
+        ],
+    )
+    save_table(state_summary, output_root / "state" / "state_summary.csv")
+    plot_state_summary(state_df, output_root / "state" / "state_shock_summary.png")
+
+    transition_tables = []
+    for variant in ATTR_VARIANTS:
+        transition_tables.append(evaluate_transition_events(transition_events, frames[variant], variant))
+    transition_df = pd.concat(transition_tables, ignore_index=True)
+    transition_df = attach_raw_transition_labels(transition_df, Path(args.raw_trajectory))
+    save_table(transition_df, output_root / "attribution" / "transition_events.csv")
+    transition_group_col = "transition_type_plot" if "transition_type_plot" in transition_df.columns else "transition_type"
+    transition_summary = summarize(transition_df, ["variant", transition_group_col], TRANSITION_METRICS)
+    transition_summary = transition_summary.rename(columns={transition_group_col: "transition_type"})
+    save_table(transition_summary, output_root / "attribution" / "transition_summary.csv")
+    transition_binned = assign_exploration_bins(transition_df)
+    transition_binned_summary = summarize_binned_metric(
+        transition_binned,
+        TRANSITION_PLOT_METRIC,
+        transition_col=transition_group_col,
+    )
+    save_table(transition_binned_summary, output_root / "attribution" / "transition_exploration_summary.csv")
+    transition_gap = build_transition_gap(transition_df, transition_col=transition_group_col)
+    save_table(transition_gap, output_root / "attribution" / "transition_gap.csv")
+    plot_transition_summary(transition_df, output_root / "attribution" / "transition_summary.png")
+
+    print(f"Saved ablation analysis under: {output_root.resolve()}")
+
+
+if __name__ == "__main__":
+    main()
