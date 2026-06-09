@@ -20,6 +20,9 @@ ANCHOR_SIM_THRESHOLD = 0.30
 BATCH_SIZE = 256
 SENSITIVITY_N_HISTORY = [5, 10, 20]
 SENSITIVITY_N_FUTURE_VALUES = [5, 10, 20]
+RAW_CURVE_WINDOW = 4000
+RAW_CURVE_MIN_PERIODS = 250
+RAW_SCATTER_SAMPLE_SIZE = 20000
 
 from _shared import CACHE_DIR, FIG_DIR, INTERMEDIATE_DIR, STEP1_DIR, STEP4_DIR
 
@@ -208,6 +211,7 @@ def build_scores(events, event_emb, n_history=N_HISTORY, n_future=N_FUTURE):
             fut = emb[t + 1:t + 1 + n_future]
             history_similarity = np.nan
             exploration_score = np.nan
+            future_dispersion = np.nan
             if len(hist) >= MIN_HISTORY:
                 hist_center = mean_unit(hist)
                 history_similarity = float(np.dot(emb[t], hist_center))
@@ -216,6 +220,7 @@ def build_scores(events, event_emb, n_history=N_HISTORY, n_future=N_FUTURE):
             if len(fut) >= MIN_FUTURE:
                 fut_center = mean_unit(fut)
                 future_consistency = float(np.dot(emb[t], fut_center))
+                future_dispersion = float(np.mean(1.0 - (fut @ fut_center)))
             prev_domain = domains[t - 1] if t > 0 else 'START'
             rows.append({
                 'user_id': int(user_id),
@@ -231,6 +236,7 @@ def build_scores(events, event_emb, n_history=N_HISTORY, n_future=N_FUTURE):
                 'history_similarity': history_similarity,
                 'exploration_score': exploration_score,
                 'future_consistency': future_consistency,
+                'future_dispersion': future_dispersion,
             })
     scores = pd.DataFrame(rows)
 
@@ -322,38 +328,120 @@ def build_scores(events, event_emb, n_history=N_HISTORY, n_future=N_FUTURE):
 
 
 def summarize_part1(scores):
-    plot_df = scores.dropna(subset=['exploration_pct_user', 'future_consistency']).copy()
-    plot_df['exploration_pct_bin'] = pd.cut(plot_df['exploration_pct_user'], bins=np.linspace(0, 1, 11), include_lowest=True)
-    return (
-        plot_df.groupby('exploration_pct_bin', observed=True)
-        .agg(
-            exploration_pct_mid=('exploration_pct_user', 'mean'),
-            future_consistency_mean=('future_consistency', 'mean'),
-            future_consistency_sem=('future_consistency', lambda x: x.std(ddof=1) / np.sqrt(len(x)) if len(x) > 1 else 0),
-            events=('future_consistency', 'size'),
-        )
-        .reset_index()
+    plot_df = scores.dropna(subset=['exploration_score', 'future_consistency', 'future_dispersion']).copy()
+    plot_df = plot_df.sort_values('exploration_score').reset_index(drop=True)
+    if plot_df.empty:
+        return pd.DataFrame(columns=[
+            'exploration_score',
+            'future_consistency_mean',
+            'future_consistency_sem',
+            'future_dispersion_mean',
+            'future_dispersion_sem',
+            'events',
+        ])
+
+    consistency_roll = plot_df['future_consistency'].rolling(
+        window=RAW_CURVE_WINDOW,
+        center=True,
+        min_periods=RAW_CURVE_MIN_PERIODS,
     )
+    dispersion_roll = plot_df['future_dispersion'].rolling(
+        window=RAW_CURVE_WINDOW,
+        center=True,
+        min_periods=RAW_CURVE_MIN_PERIODS,
+    )
+
+    consistency_count = consistency_roll.count().to_numpy(dtype=float)
+    dispersion_count = dispersion_roll.count().to_numpy(dtype=float)
+
+    summary = pd.DataFrame({
+        'exploration_score': plot_df['exploration_score'].to_numpy(dtype=float),
+        'future_consistency_mean': consistency_roll.mean().to_numpy(dtype=float),
+        'future_consistency_sem': (
+            consistency_roll.std(ddof=1).to_numpy(dtype=float) / np.sqrt(np.maximum(consistency_count, 1.0))
+        ),
+        'future_dispersion_mean': dispersion_roll.mean().to_numpy(dtype=float),
+        'future_dispersion_sem': (
+            dispersion_roll.std(ddof=1).to_numpy(dtype=float) / np.sqrt(np.maximum(dispersion_count, 1.0))
+        ),
+        'events': np.ones(len(plot_df), dtype=int),
+    })
+    return summary.dropna(subset=['future_consistency_mean', 'future_dispersion_mean']).reset_index(drop=True)
+
+
+def plot_part1_main(scores):
+    fig1 = summarize_part1(scores)
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.8), sharex=True)
+    panels = [
+        (
+            axes[0],
+            'future_consistency_mean',
+            'future_consistency_sem',
+            'Future Consistency',
+            'future_consistency',
+        ),
+        (
+            axes[1],
+            'future_dispersion_mean',
+            'future_dispersion_sem',
+            'Future Expansion',
+            'future_dispersion',
+        ),
+    ]
+
+    for ax, mean_col, sem_col, ylabel, raw_ycol in panels:
+        sample_df = scores.dropna(subset=['exploration_score', raw_ycol]).copy()
+        if len(sample_df) > RAW_SCATTER_SAMPLE_SIZE:
+            sample_df = sample_df.sample(RAW_SCATTER_SAMPLE_SIZE, random_state=0)
+        ax.scatter(
+            sample_df['exploration_score'],
+            sample_df[raw_ycol],
+            s=4,
+            alpha=0.035,
+            color='#1f77b4',
+            edgecolors='none',
+        )
+        ax.errorbar(
+            fig1['exploration_score'],
+            fig1[mean_col],
+            yerr=1.96 * fig1[sem_col],
+            linewidth=2.2,
+            color='#1f77b4',
+        )
+        ax.set_xlabel('Exploration Score')
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.25)
+
+    axes[0].set_title('Future Consistency')
+    axes[1].set_title('Future Expansion')
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / 'fig1_exploration_vs_future_consistency_and_dispersion.png', dpi=200, bbox_inches='tight')
+    plt.close(fig)
 
 
 def plot_part1_sensitivity(history_curves, future_curves):
     fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.8), sharey=True)
     palette = plt.get_cmap('tab10')
 
-    def draw_panel(ax, curves, title, ylabel):
+    def draw_panel(ax, curves, title, ylabel, mean_col, sem_col):
         for i, curve in enumerate(curves):
             color = palette(i % 10)
-            ax.errorbar(
-                curve['summary']['exploration_pct_mid'],
-                curve['summary']['future_consistency_mean'],
-                yerr=1.96 * curve['summary']['future_consistency_sem'],
-                marker='o',
+            ax.plot(
+                curve['summary']['exploration_score'],
+                curve['summary'][mean_col],
                 linewidth=2,
                 color=color,
                 label=curve['label'],
             )
+            ax.fill_between(
+                curve['summary']['exploration_score'],
+                curve['summary'][mean_col] - 1.96 * curve['summary'][sem_col],
+                curve['summary'][mean_col] + 1.96 * curve['summary'][sem_col],
+                color=color,
+                alpha=0.10,
+            )
         ax.set_title(title)
-        ax.set_xlabel('Within-user Exploration Score Percentile')
+        ax.set_xlabel('Exploration Score')
         ax.set_ylabel(ylabel)
         ax.grid(alpha=0.25)
         ax.legend(frameon=False, title='Variant')
@@ -363,15 +451,19 @@ def plot_part1_sensitivity(history_curves, future_curves):
         history_curves,
         f'Fixed N_FUTURE={N_FUTURE}, vary N_HISTORY',
         f'Future Consistency',
+        'future_consistency_mean',
+        'future_consistency_sem',
     )
     draw_panel(
         axes[1],
         future_curves,
         f'Fixed N_HISTORY={N_HISTORY}, vary N_FUTURE',
-        f'Future Consistency',
+        f'Future Semantic Dispersion',
+        'future_dispersion_mean',
+        'future_dispersion_sem',
     )
     fig.tight_layout()
-    fig.savefig(FIG_DIR / 'fig1_exploration_vs_future_consistency_sensitivity.png', dpi=200, bbox_inches='tight')
+    fig.savefig(FIG_DIR / 'fig1_exploration_vs_future_consistency_and_dispersion_sensitivity.png', dpi=200, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -384,6 +476,7 @@ def main():
     print(f'\nPart1 default variant: N_HISTORY={N_HISTORY}, N_FUTURE={N_FUTURE}')
     default_scores = build_scores(events, event_emb, n_history=N_HISTORY, n_future=N_FUTURE)
     dump_pickle(default_scores, INTERMEDIATE_DIR / '1-exploration-scores.pkl')
+    plot_part1_main(default_scores)
     print('scores', default_scores.shape)
     print(default_scores['episode_type'].value_counts(dropna=False))
 

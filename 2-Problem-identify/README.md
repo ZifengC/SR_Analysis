@@ -126,8 +126,10 @@ That sorted event list is the input to Part 1.
 
 ### Figure Structure
 
-- `Figure 1` shows the main relationship between exploration score percentile and future consistency.
-- The sensitivity version uses two panels: left varies `N_HISTORY` with fixed `N_FUTURE`, right varies `N_FUTURE` with fixed `N_HISTORY`.
+- `Figure 1` uses two side-by-side panels.
+- The left panel shows future consistency as a function of exploration score.
+- The right panel shows future semantic dispersion as a function of exploration score.
+- The sensitivity version uses two panels with the same raw exploration-score x-axis: left varies `N_HISTORY` with fixed `N_FUTURE`, right varies `N_FUTURE` with fixed `N_HISTORY`.
 
 ## Part 3: Run-Length Consolidation and Radius
 
@@ -232,9 +234,10 @@ future_dispersion = mean(1 - cos(future_event, future_center))
 ### Figure Structure
 
 - `Figure 2.2.2` uses two side-by-side panels.
-- The left panel shows future consistency as a function of exploration score.
-- The right panel shows future semantic dispersion as a function of exploration score.
-- Each panel overlays the four transition types with fixed colors.
+- The left panel shows future consistency as a function of exploration score, with four transition-specific trend lines.
+- The right panel shows future semantic dispersion as a function of exploration score, with four transition-specific trend lines.
+- A shaded band shows the 95% confidence interval around the mean in each quantile bin.
+- The four transition types are ordered as `R->R`, `R->S`, `S->R`, `S->S`.
 - Exploration score is binned into quantiles for stable curves.
 - This figure is fixed at `N_HISTORY=10` and `K_FUTURE=5`.
 

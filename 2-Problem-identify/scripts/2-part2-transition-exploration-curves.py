@@ -139,7 +139,7 @@ def plot_transition_curves(summary):
             axes[1],
             'future_dispersion_mean',
             'future_dispersion_sem',
-            'Future Semantic Dispersion',
+            'Future Expansion',
         ),
     ]
 

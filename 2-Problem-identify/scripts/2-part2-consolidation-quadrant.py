@@ -136,16 +136,16 @@ def plot_quadrant_figure_3d(runs):
 
     fig = plt.figure(figsize=(12.5, 7.2))
     ax = fig.add_subplot(111, projection='3d')
-    cmap = plt.get_cmap('viridis')
+    cmap = plt.get_cmap('Blues')
 
     z = runs['run_length'].to_numpy(dtype=float)
     sc = ax.scatter(
         runs['future_stability'],
         runs['future_radius'],
         z,
-        c=runs['run_exploration_score'],
+        c=z,
         s=16,
-        alpha=0.38,
+        alpha=0.30,
         cmap=cmap,
         edgecolors='none',
         depthshade=True,
@@ -158,17 +158,17 @@ def plot_quadrant_figure_3d(runs):
 
     # Quadrant guides projected onto the base plane and extended vertically.
     ax.plot([x_thr, x_thr], [runs['future_radius'].min(), runs['future_radius'].max()], [z_min, z_min],
-            color='black', linestyle='--', linewidth=1.1, alpha=0.85)
+            color='black', linestyle='--', linewidth=1.0, alpha=0.55)
     ax.plot([runs['future_stability'].min(), runs['future_stability'].max()], [y_thr, y_thr], [z_min, z_min],
-            color='black', linestyle='--', linewidth=1.1, alpha=0.85)
+            color='black', linestyle='--', linewidth=1.0, alpha=0.55)
     ax.plot([x_thr, x_thr], [runs['future_radius'].min(), runs['future_radius'].min()], [z_min, z_max],
-            color='black', linestyle=':', linewidth=0.9, alpha=0.55)
+            color='black', linestyle=':', linewidth=0.9, alpha=0.34)
     ax.plot([x_thr, x_thr], [runs['future_radius'].max(), runs['future_radius'].max()], [z_min, z_max],
-            color='black', linestyle=':', linewidth=0.9, alpha=0.55)
+            color='black', linestyle=':', linewidth=0.9, alpha=0.34)
     ax.plot([runs['future_stability'].min(), runs['future_stability'].min()], [y_thr, y_thr], [z_min, z_max],
-            color='black', linestyle=':', linewidth=0.9, alpha=0.55)
+            color='black', linestyle=':', linewidth=0.9, alpha=0.34)
     ax.plot([runs['future_stability'].max(), runs['future_stability'].max()], [y_thr, y_thr], [z_min, z_max],
-            color='black', linestyle=':', linewidth=0.9, alpha=0.55)
+            color='black', linestyle=':', linewidth=0.9, alpha=0.34)
 
     ax.set_xlabel('Future Consistency', fontsize=13, labelpad=12)
     ax.set_ylabel('Future Semantic Dispersion', fontsize=13, labelpad=12)
@@ -178,14 +178,14 @@ def plot_quadrant_figure_3d(runs):
     ax.view_init(elev=24, azim=-58)
 
     try:
-        ax.xaxis.pane.set_alpha(0.08)
-        ax.yaxis.pane.set_alpha(0.08)
-        ax.zaxis.pane.set_alpha(0.08)
+        ax.xaxis.pane.set_alpha(0.05)
+        ax.yaxis.pane.set_alpha(0.05)
+        ax.zaxis.pane.set_alpha(0.05)
     except Exception:
         pass
 
     cbar = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.08, shrink=0.88)
-    cbar.set_label('Exploration Score', fontsize=13)
+    cbar.set_label('Run Length', fontsize=13)
 
     fig.tight_layout()
     fig.savefig(FIG_DIR / 'fig2_consolidation_quadrants-3D.png', dpi=200, bbox_inches='tight')
