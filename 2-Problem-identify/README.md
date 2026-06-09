@@ -129,31 +129,6 @@ That sorted event list is the input to Part 1.
 - `Figure 1` shows the main relationship between exploration score percentile and future consistency.
 - The sensitivity version uses two panels: left varies `N_HISTORY` with fixed `N_FUTURE`, right varies `N_FUTURE` with fixed `N_HISTORY`.
 
-## Part 1.2: Transition-Level Exploration Asymmetry
-
-### What It Measures
-
-Part 1.2 keeps the same event-level scores, but groups them by immediate transition type:
-
-```text
-transition_type = previous_channel -> current_channel
-```
-
-This makes the analysis directional:
-
-- `R->S` can be compared directly with `S->R`
-- `R->R` can be compared directly with `S->S`
-
-The figure compares the mean exploration score and mean future consistency for each transition type.
-
-### Figure Structure
-
-- `Figure 1.2` uses one panel with four transition-specific trend lines.
-- Each line shows future consistency as a function of within-user exploration percentile.
-- A shaded band shows the 95% confidence interval around the mean in each percentile bin.
-- The four transition types are ordered as `R->R`, `R->S`, `S->R`, `S->S`.
-- This figure is fixed at `N_HISTORY=10` and `N_FUTURE=10`.
-
 ## Part 3: Run-Length Consolidation and Radius
 
 ### What It Measures
@@ -317,7 +292,6 @@ Recommended order:
 
 ```bash
 /Users/Brodie/miniconda3/bin/python3 2-Problem-identify/scripts/1-part1-exploration.py
-/Users/Brodie/miniconda3/bin/python3 2-Problem-identify/scripts/1-part1-transition-level.py
 /Users/Brodie/miniconda3/bin/python3 2-Problem-identify/scripts/2-part2-transition-level.py
 /Users/Brodie/miniconda3/bin/python3 2-Problem-identify/scripts/2-part2-transition-exploration-curves.py
 /Users/Brodie/miniconda3/bin/python3 2-Problem-identify/scripts/2-part2-consolidation-quadrant.py
@@ -522,17 +496,16 @@ Minimum historical-anchor similarity. Part 4 applies its own threshold filters f
 Use the Python 3.11 environment, then run the analyses in order.
 
 1. Part 1.1 builds event-level exploration scores and Figure 1.
-2. Part 1.2 builds transition-level exploration asymmetry and Figure 1.2.
-3. Part 2.1 builds event-level semantic-neighbor runs and Figure 2.
-4. Part 2.2 builds anchor-conditioned transition adoption and Figure 2.2.
-5. Part 2.2.2 builds transition-stratified exploration curves and Figure 2.2.2.
-6. Part 2.3 builds consolidation quadrants and Figure 2.3.
-7. Part 2.4 builds transition-colored consolidation quadrants and Figure 2.4.
-8. Part 3 builds run-length consolidation and radius curves and Figure 3.
-9. Part 4 builds anchor-based adoption statistics and Figure 4.
-10. Part 4.2 builds anchor-transition exploration rates and Figure 4.
+2. Part 2.1 builds event-level semantic-neighbor runs and Figure 2.
+3. Part 2.2 builds anchor-conditioned transition adoption and Figure 2.2.
+4. Part 2.2.2 builds transition-stratified exploration curves and Figure 2.2.2.
+5. Part 2.3 builds consolidation quadrants and Figure 2.3.
+6. Part 2.4 builds transition-colored consolidation quadrants and Figure 2.4.
+7. Part 3 builds run-length consolidation and radius curves and Figure 3.
+8. Part 4 builds anchor-based adoption statistics and Figure 4.
+9. Part 4.2 builds anchor-transition exploration rates and Figure 4.
 
-Part 1.1 must run first because it creates the event timeline, embeddings, exploration scores, and anchors. Parts 1.2, 2.1, 2.2, 3, and 4 reuse Part 1.1 state and can then be rerun independently for their own sensitivity settings.
+Part 1.1 must run first because it creates the event timeline, embeddings, exploration scores, and anchors. Parts 2.1, 2.2, 3, and 4 reuse Part 1.1 state and can then be rerun independently for their own sensitivity settings.
 
 
 ## Environment Pinning

@@ -336,22 +336,6 @@ def summarize_part1(scores):
     )
 
 
-def plot_part1(scores, suffix='', write_default=False):
-    fig1 = summarize_part1(scores)
-    plt.figure(figsize=(7, 4.5))
-    plt.errorbar(fig1['exploration_pct_mid'], fig1['future_consistency_mean'], yerr=1.96 * fig1['future_consistency_sem'], marker='o', linewidth=2)
-    plt.xlabel('Within-user exploration score percentile')
-    plt.ylabel(f'Future consistency: cos(e_t, mean(next {N_FUTURE}))')
-    plt.title('Exploration Score vs Future Consistency')
-    plt.grid(alpha=0.25)
-    plt.tight_layout()
-    plt.savefig(FIG_DIR / f'fig1_exploration_vs_future_consistency{suffix}.png', dpi=200)
-    if write_default:
-        plt.savefig(FIG_DIR / 'fig1_exploration_vs_future_consistency.png', dpi=200)
-    plt.close()
-    return fig1
-
-
 def plot_part1_sensitivity(history_curves, future_curves):
     fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.8), sharey=True)
     palette = plt.get_cmap('tab10')
@@ -400,7 +384,6 @@ def main():
     print(f'\nPart1 default variant: N_HISTORY={N_HISTORY}, N_FUTURE={N_FUTURE}')
     default_scores = build_scores(events, event_emb, n_history=N_HISTORY, n_future=N_FUTURE)
     dump_pickle(default_scores, INTERMEDIATE_DIR / '1-exploration-scores.pkl')
-    plot_part1(default_scores, write_default=True)
     print('scores', default_scores.shape)
     print(default_scores['episode_type'].value_counts(dropna=False))
 

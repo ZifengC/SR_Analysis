@@ -84,6 +84,11 @@ def build_run_table(events, event_emb):
                 future_radius = float(np.mean(1.0 - (future @ future_center)))
                 future_stability = float(np.dot(run_center, future_center))
                 run_transition_type = run_transition_label(domains, start, end)
+                run_scores = g.iloc[start:end + 1]['exploration_score'].to_numpy(dtype=float)
+                if np.isfinite(run_scores).any():
+                    run_exploration_score = float(np.nanmean(run_scores))
+                else:
+                    run_exploration_score = np.nan
 
                 rows.append({
                     'user_id': int(user_id),
@@ -93,6 +98,7 @@ def build_run_table(events, event_emb):
                     'current_radius': current_radius,
                     'future_stability': future_stability,
                     'future_radius': future_radius,
+                    'run_exploration_score': run_exploration_score,
                     'run_transition_type': run_transition_type,
                     'neighbor_threshold_user': neighbor_threshold,
                 })
@@ -104,46 +110,59 @@ def build_run_table(events, event_emb):
 
 def plot_transition_quadrant(runs):
     import matplotlib.pyplot as plt
-    from matplotlib.lines import Line2D
 
-    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
-
-    for transition in TRANSITION_ORDER:
-        sub = runs[runs['run_transition_type'] == transition]
-        if sub.empty:
-            continue
-        ax.scatter(
-            sub['future_stability'],
-            sub['future_radius'],
-            s=14,
-            alpha=0.35,
-            color=TRANSITION_COLORS[transition],
-            edgecolors='none',
-            label=transition,
-        )
-
+    fig, axes = plt.subplots(2, 2, figsize=(12.5, 9.2), sharex=True, sharey=True)
+    axes = axes.ravel()
+    cmap = plt.get_cmap('viridis')
     x_thr = float(runs['future_stability'].median())
     y_thr = float(runs['future_radius'].median())
-    ax.axvline(x_thr, color='black', linestyle='--', linewidth=1)
-    ax.axhline(y_thr, color='black', linestyle='--', linewidth=1)
+    x_min = float(runs['future_stability'].min())
+    x_max = float(runs['future_stability'].max())
+    y_min = float(runs['future_radius'].min())
+    y_max = float(runs['future_radius'].max())
 
-    x_min, x_max = ax.get_xlim()
-    y_min, y_max = ax.get_ylim()
     x_pad = (x_max - x_min) * 0.04
     y_pad = (y_max - y_min) * 0.04
     label_box = dict(boxstyle='round,pad=0.22', facecolor='white', alpha=0.72, edgecolor='none')
-    ax.text(x_min + x_pad, y_max - y_pad, 'unstable + diffuse', fontsize=12, va='top', ha='left', bbox=label_box)
-    ax.text(x_thr + x_pad * 0.4, y_max - y_pad, 'stable + diffuse', fontsize=12, va='top', ha='left', bbox=label_box)
-    ax.text(x_min + x_pad, y_min + y_pad * 0.8, 'convergent but not retained', fontsize=12, va='bottom', ha='left', bbox=label_box)
-    ax.text(x_thr + x_pad * 0.4, y_min + y_pad * 0.8, 'strong consolidation', fontsize=12, va='bottom', ha='left', bbox=label_box)
 
-    ax.set_xlabel('Future Consistency', fontsize=14)
-    ax.set_ylabel('Future Semantic Dispersion', fontsize=14)
-    ax.grid(alpha=0.18)
+    last_sc = None
+    for ax, transition in zip(axes, TRANSITION_ORDER):
+        sub = runs[runs['run_transition_type'] == transition]
+        if sub.empty:
+            ax.set_visible(False)
+            continue
 
-    handles = [Line2D([0], [0], marker='o', color='w', markerfacecolor=TRANSITION_COLORS[t], markersize=8, label=t) for t in TRANSITION_ORDER]
-    ax.legend(handles=handles, frameon=False, title='Run transition')
+        last_sc = ax.scatter(
+            sub['future_stability'],
+            sub['future_radius'],
+            c=sub['run_exploration_score'],
+            s=14,
+            alpha=0.35,
+            cmap=cmap,
+            edgecolors='none',
+        )
+        ax.axvline(x_thr, color='black', linestyle='--', linewidth=1)
+        ax.axhline(y_thr, color='black', linestyle='--', linewidth=1)
 
+        ax.text(x_min + x_pad, y_max - y_pad, 'unstable + diffuse', fontsize=10, va='top', ha='left', bbox=label_box)
+        ax.text(x_thr + x_pad * 0.4, y_max - y_pad, 'stable + diffuse', fontsize=10, va='top', ha='left', bbox=label_box)
+        ax.text(x_min + x_pad, y_min + y_pad * 0.8, 'convergent but not retained', fontsize=10, va='bottom', ha='left', bbox=label_box)
+        ax.text(x_thr + x_pad * 0.4, y_min + y_pad * 0.8, 'strong consolidation', fontsize=10, va='bottom', ha='left', bbox=label_box)
+
+        ax.set_title(transition, fontsize=12)
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+        ax.grid(alpha=0.18)
+
+    for ax in axes[2:]:
+        ax.set_xlabel('Future Consistency', fontsize=13)
+    for ax in axes[::2]:
+        ax.set_ylabel('Future Semantic Dispersion', fontsize=13)
+
+    cbar = fig.colorbar(last_sc, ax=axes.tolist(), fraction=0.035, pad=0.02)
+    cbar.set_label('Exploration Score', fontsize=14)
+
+    fig.suptitle('Figure 2: Consolidation Quadrants by Transition', y=0.995, fontsize=15)
     fig.tight_layout()
     fig.savefig(FIG_DIR / 'fig2_consolidation_quadrants_by_transition.png', dpi=200, bbox_inches='tight')
     plt.close(fig)
