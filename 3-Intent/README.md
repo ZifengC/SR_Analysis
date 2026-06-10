@@ -101,9 +101,9 @@ Runs intent-pattern analysis on the full PC-SAR export.
 #### What it does
 
 - treats `history_src_share` as the exploration proxy
-- summarizes how exploration relates to intent ambiguity
+- summarizes how exploration relates to intent posterior variation
 - measures stable run length and semantic dispersion
-- summarizes how intent shift varies across transition types
+- summarizes how JS-based intent shift varies across transition types
 
 #### Outputs
 
@@ -112,8 +112,16 @@ Runs intent-pattern analysis on the full PC-SAR export.
 - `output/23/stable_runs.csv`
 - `output/23/run_length_intent_consolidation_dispersion.csv`
 - `output/23/run_length_intent_consolidation_dispersion.png`
+- `output/5/intent_future_consistency_and_expansion.csv`
+- `output/5/intent_future_consistency_and_expansion_curve.csv`
+- `output/5/intent_future_consistency_and_expansion.png`
 - `output/4/transition_type_intent_shift.csv`
 - `output/4/transition_type_intent_shift.png`
+
+The transition figure contains two panels:
+
+- consecutive global intent posterior JS distance
+- rec vs src intent posterior JS distance
 
 ## Recommended Run Order
 

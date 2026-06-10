@@ -30,13 +30,14 @@ TRANSITION_METRICS = [
     "adoption_rate",
     "future_consistency",
     "cross_channel_gain",
+    "anchor_similarity",
 ]
 TRANSITION_PLOT_METRIC = "intent_shift"
 EXPLORATION_BIN_COUNT = 10
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT_ROOT = SCRIPT_DIR.parent
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR.parent / "output_ablation"
-DEFAULT_RAW_TRAJECTORY = SCRIPT_DIR.parent / "output" / "raw_trajectory" / "raw_trajectory.csv"
+DEFAULT_STEP4_ROOT = SCRIPT_DIR.parent.parent / "Data" / "Step4"
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,10 +55,10 @@ def parse_args() -> argparse.Namespace:
         help="Directory to write ablation tables and figures.",
     )
     parser.add_argument(
-        "--raw-trajectory",
+        "--step4-root",
         type=str,
-        default=str(DEFAULT_RAW_TRAJECTORY),
-        help="Optional raw trajectory CSV used to relabel transitions.",
+        default=str(DEFAULT_STEP4_ROOT),
+        help="Directory containing Data/Step4 rec_all.pkl and src_all.pkl for full-history anchors.",
     )
     return parser.parse_args()
 
@@ -194,6 +195,122 @@ def row_cos(row_a: pd.Series, row_b: pd.Series, cols_a: list[str], cols_b: list[
     return safe_cosine(row_vector(row_a, cols_a), row_vector(row_b, cols_b))
 
 
+def normalize_matrix(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    norms = np.linalg.norm(values, axis=1, keepdims=True)
+    valid = np.isfinite(values).all(axis=1, keepdims=True) & (norms > 1e-12)
+    out = np.zeros_like(values, dtype=np.float64)
+    np.divide(values, norms, out=out, where=valid)
+    return out
+
+
+def event_embedding_matrix(df: pd.DataFrame) -> tuple[np.ndarray, str]:
+    """Return one comparable embedding per sample.
+
+    R events use the clicked item embedding. S events prefer the query embedding
+    when it is exported; otherwise they fall back to the clicked item embedding.
+    """
+    pos_cols = vector_columns(df, "pos_item_emb_")
+    query_cols = vector_columns(df, "query_emb_")
+    if not pos_cols:
+        raise KeyError("Missing pos_item_emb_* columns required for semantic anchors.")
+
+    pos = df[pos_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+    emb = pos.copy()
+    source = "pos_item_emb"
+
+    if query_cols:
+        query = df[query_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        query_valid = np.linalg.norm(query, axis=1) > 1e-12
+        is_search = df["channel"].astype(str).str.upper().to_numpy() == "S"
+        use_query = is_search & query_valid
+        emb[use_query] = query[use_query]
+        source = "query_emb_for_S_pos_item_emb_for_R"
+
+    return normalize_matrix(emb), source
+
+
+def embedding_maps(df: pd.DataFrame) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray], str]:
+    emb, source = event_embedding_matrix(df)
+    item_map: dict[int, np.ndarray] = {}
+    session_map: dict[int, np.ndarray] = {}
+
+    item_ids = pd.to_numeric(df.get("item_id", pd.Series(dtype=float)), errors="coerce")
+    for pos, item_id in enumerate(item_ids):
+        if pd.notna(item_id) and np.any(emb[pos]):
+            item_map.setdefault(int(item_id), emb[pos])
+
+    query_cols = vector_columns(df, "query_emb_")
+    if query_cols and "search_session_id" in df.columns:
+        query = df[query_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        query = normalize_matrix(query)
+        session_ids = pd.to_numeric(df["search_session_id"], errors="coerce")
+        is_search = df["channel"].astype(str).str.upper().to_numpy() == "S"
+        for pos, session_id in enumerate(session_ids):
+            if is_search[pos] and pd.notna(session_id) and np.any(query[pos]):
+                session_map.setdefault(int(session_id), query[pos])
+
+    return item_map, session_map, source
+
+
+def build_step4_anchor_pool(base_df: pd.DataFrame, step4_root: Path) -> pd.DataFrame:
+    rec_path = step4_root / "rec_all.pkl"
+    src_path = step4_root / "src_all.pkl"
+    if not rec_path.exists() or not src_path.exists():
+        return pd.DataFrame()
+
+    item_map, session_map, embedding_source = embedding_maps(base_df)
+    users = set(pd.to_numeric(base_df["user_id"], errors="coerce").dropna().astype(int))
+    rows = []
+
+    rec = pd.read_pickle(rec_path)[["user_id", "item_id", "timestamp"]]
+    rec = rec[rec["user_id"].isin(users)]
+    for row in rec.itertuples(index=False):
+        item_id = int(row.item_id)
+        emb = item_map.get(item_id)
+        if emb is None:
+            continue
+        rows.append(
+            {
+                "user_id": int(row.user_id),
+                "timestamp": float(row.timestamp),
+                "channel": "R",
+                "item_id": item_id,
+                "search_session_id": np.nan,
+                "embedding": emb,
+                "anchor_embedding_source": f"step4_item_lookup:{embedding_source}",
+            }
+        )
+
+    src = pd.read_pickle(src_path)[["user_id", "item_id", "timestamp", "search_session_id"]]
+    src = src[src["user_id"].isin(users)]
+    for row in src.itertuples(index=False):
+        item_id = int(row.item_id)
+        session_id = int(row.search_session_id)
+        emb = session_map.get(session_id)
+        source = f"step4_query_lookup:{embedding_source}"
+        if emb is None:
+            emb = item_map.get(item_id)
+            source = f"step4_item_fallback:{embedding_source}"
+        if emb is None:
+            continue
+        rows.append(
+            {
+                "user_id": int(row.user_id),
+                "timestamp": float(row.timestamp),
+                "channel": "S",
+                "item_id": item_id,
+                "search_session_id": session_id,
+                "embedding": emb,
+                "anchor_embedding_source": source,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(["user_id", "timestamp", "channel"], kind="mergesort").reset_index(drop=True)
+
+
 def build_state_events(base_df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for user_id, g in base_df.groupby("user_id", sort=False):
@@ -233,17 +350,27 @@ def build_state_events(base_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def build_transition_events(base_df: pd.DataFrame) -> pd.DataFrame:
+def build_transition_events(base_df: pd.DataFrame, step4_root: Path | None = None) -> pd.DataFrame:
+    event_emb, embedding_source = event_embedding_matrix(base_df)
+    anchor_pool = build_step4_anchor_pool(base_df, step4_root) if step4_root is not None else pd.DataFrame()
+    use_step4_pool = not anchor_pool.empty
     rows = []
     for user_id, g in base_df.groupby("user_id", sort=False):
+        original_index = g.index.to_numpy()
         g = g.reset_index(drop=True)
         if len(g) < 2:
             continue
-        last_seen: dict[str, int | None] = {"R": None, "S": None}
+        emb = event_emb[original_index]
+        channels = g["channel"].astype(str).str.upper().to_numpy()
+        user_anchor_pool = pd.DataFrame()
+        if use_step4_pool:
+            user_anchor_pool = anchor_pool[anchor_pool["user_id"] == int(user_id)].reset_index(drop=True)
         for i in range(len(g)):
             cur = g.iloc[i]
-            cur_channel = str(cur["channel"]).upper()
+            cur_channel = channels[i]
             if cur_channel not in {"R", "S"}:
+                continue
+            if not np.any(emb[i]):
                 continue
 
             future_index = int(g.iloc[i + 1]["sample_index"]) if i + 1 < len(g) else np.nan
@@ -254,41 +381,82 @@ def build_transition_events(base_df: pd.DataFrame) -> pd.DataFrame:
             )
 
             for anchor_channel in ("R", "S"):
-                anchor_index = last_seen[anchor_channel]
-                if anchor_index is None:
-                    continue
-                anchor_row = g.iloc[int(anchor_index)]
+                if use_step4_pool and not user_anchor_pool.empty:
+                    candidates = user_anchor_pool[
+                        (user_anchor_pool["channel"] == anchor_channel)
+                        & (user_anchor_pool["timestamp"] < float(cur.get("timestamp", np.nan)))
+                    ]
+                    if candidates.empty:
+                        continue
+                    candidate_emb = np.vstack(candidates["embedding"].to_numpy())
+                    similarities = candidate_emb @ emb[i]
+                    best_pos = int(np.argmax(similarities))
+                    anchor_row = candidates.iloc[best_pos]
+                    anchor_sample_index = np.nan
+                    anchor_item_id = anchor_row.get("item_id", np.nan)
+                    anchor_search_session_id = anchor_row.get("search_session_id", np.nan)
+                    anchor_timestamp = float(anchor_row.get("timestamp", np.nan))
+                    anchor_similarity = float(similarities[best_pos])
+                    anchor_gap = int(
+                        (
+                            (user_anchor_pool["timestamp"] > anchor_timestamp)
+                            & (user_anchor_pool["timestamp"] < float(cur.get("timestamp", np.nan)))
+                        ).sum()
+                        + 1
+                    )
+                    anchor_source = str(anchor_row.get("anchor_embedding_source", embedding_source))
+                else:
+                    prior = np.arange(i)
+                    anchor_candidates = prior[channels[:i] == anchor_channel]
+                    if len(anchor_candidates) == 0:
+                        continue
+                    candidate_emb = emb[anchor_candidates]
+                    valid = np.linalg.norm(candidate_emb, axis=1) > 1e-12
+                    if not valid.any():
+                        continue
+                    valid_candidates = anchor_candidates[valid]
+                    similarities = candidate_emb[valid] @ emb[i]
+                    best_pos = int(np.argmax(similarities))
+                    anchor_index = int(valid_candidates[best_pos])
+                    anchor_row = g.iloc[int(anchor_index)]
+                    anchor_sample_index = int(anchor_row["sample_index"])
+                    anchor_item_id = anchor_row.get("item_id", np.nan)
+                    anchor_search_session_id = anchor_row.get("search_session_id", np.nan)
+                    anchor_timestamp = float(anchor_row.get("timestamp", np.nan))
+                    anchor_similarity = float(similarities[best_pos])
+                    anchor_gap = int(i - int(anchor_index))
+                    anchor_source = embedding_source
                 rows.append(
                     {
                         "user_id": int(user_id),
-                        "anchor_sample_index": int(anchor_row["sample_index"]),
+                        "anchor_sample_index": anchor_sample_index,
+                        "anchor_item_id": anchor_item_id,
+                        "anchor_search_session_id": anchor_search_session_id,
+                        "anchor_timestamp": anchor_timestamp,
                         "sample_index": int(cur["sample_index"]),
                         "future_sample_index": future_index,
                         "anchor_channel": anchor_channel,
                         "current_channel": cur_channel,
                         "transition_type": f"{anchor_channel}->{cur_channel}",
                         "exploration_score": exploration_score,
-                        "anchor_gap": int(i - int(anchor_index)),
+                        "anchor_gap": anchor_gap,
+                        "anchor_similarity": anchor_similarity,
+                        "anchor_embedding_source": anchor_source,
                     }
                 )
-
-            last_seen[cur_channel] = i
     return pd.DataFrame(rows)
 
 
-def get_idx(df: pd.DataFrame) -> pd.DataFrame:
-    idx = df.set_index(["user_id", "sample_index"], drop=False)
-    return idx
+def get_idx(df: pd.DataFrame) -> dict[tuple[int, int], pd.Series]:
+    return {
+        (int(row["user_id"]), int(row["sample_index"])): row
+        for _, row in df.iterrows()
+    }
 
 
-def get_row(idx: pd.DataFrame, user_id: int, sample_index: int) -> pd.Series | None:
+def get_row(idx: dict[tuple[int, int], pd.Series], user_id: int, sample_index: int) -> pd.Series | None:
     key = (int(user_id), int(sample_index))
-    if key not in idx.index:
-        return None
-    row = idx.loc[key]
-    if isinstance(row, pd.DataFrame):
-        row = row.iloc[0]
-    return row
+    return idx.get(key)
 
 
 def evaluate_state_events(events: pd.DataFrame, df: pd.DataFrame, variant: str) -> pd.DataFrame:
@@ -369,6 +537,16 @@ def evaluate_transition_events(events: pd.DataFrame, df: pd.DataFrame, variant: 
                 "channel": str(cur.get("channel", "")).upper(),
                 "transition_type": event["transition_type"],
                 "exploration_score": float(event["exploration_score"]),
+                "anchor_sample_index": (
+                    int(event["anchor_sample_index"]) if pd.notna(event["anchor_sample_index"]) else np.nan
+                ),
+                "anchor_item_id": event.get("anchor_item_id", np.nan),
+                "anchor_search_session_id": event.get("anchor_search_session_id", np.nan),
+                "anchor_timestamp": event.get("anchor_timestamp", np.nan),
+                "anchor_channel": str(event["anchor_channel"]),
+                "anchor_gap": int(event["anchor_gap"]),
+                "anchor_similarity": float(event["anchor_similarity"]),
+                "anchor_embedding_source": str(event.get("anchor_embedding_source", "")),
                 "intent_shift": float(cur.get("rec_src_intent_shift_js", np.nan)),
                 "adoption_rate": adoption_rate,
                 "future_consistency": future_consistency,
@@ -380,6 +558,11 @@ def evaluate_transition_events(events: pd.DataFrame, df: pd.DataFrame, variant: 
 
 
 def attach_raw_transition_labels(transition_df: pd.DataFrame, raw_trajectory_path: Path) -> pd.DataFrame:
+    """Legacy helper for adjacent-transition labels.
+
+    Semantic-anchor transitions should not call this by default because raw
+    adjacent labels would overwrite the embedding-nearest anchor definition.
+    """
     if not raw_trajectory_path.exists() or transition_df.empty:
         transition_df = transition_df.copy()
         transition_df["transition_type_plot"] = transition_df.get("transition_type", pd.Series(dtype=str))
@@ -446,7 +629,8 @@ def attach_raw_transition_labels(transition_df: pd.DataFrame, raw_trajectory_pat
 
 def summarize(df: pd.DataFrame, group_cols: list[str], metrics: list[str]) -> pd.DataFrame:
     rows = []
-    for keys, g in df.groupby(group_cols, sort=False):
+    grouper = group_cols[0] if len(group_cols) == 1 else group_cols
+    for keys, g in df.groupby(grouper, sort=False):
         if not isinstance(keys, tuple):
             keys = (keys,)
         row = dict(zip(group_cols, keys))
@@ -630,7 +814,7 @@ def main() -> None:
         validate_alignment(base_df, df, variant)
 
     state_events = build_state_events(base_df)
-    transition_events = build_transition_events(base_df)
+    transition_events = build_transition_events(base_df, Path(args.step4_root))
 
     state_tables = []
     for variant in STATE_VARIANTS:
@@ -654,7 +838,7 @@ def main() -> None:
     for variant in ATTR_VARIANTS:
         transition_tables.append(evaluate_transition_events(transition_events, frames[variant], variant))
     transition_df = pd.concat(transition_tables, ignore_index=True)
-    transition_df = attach_raw_transition_labels(transition_df, Path(args.raw_trajectory))
+    transition_df["transition_type_plot"] = transition_df["transition_type"]
     save_table(transition_df, output_root / "attribution" / "transition_events.csv")
     transition_group_col = "transition_type_plot" if "transition_type_plot" in transition_df.columns else "transition_type"
     transition_summary = summarize(transition_df, ["variant", transition_group_col], TRANSITION_METRICS)

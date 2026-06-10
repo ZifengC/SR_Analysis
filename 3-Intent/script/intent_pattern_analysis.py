@@ -25,6 +25,10 @@ MIN_RUN_LENGTH = 2
 MIN_BIN_SAMPLES = 5
 MAX_RUN_LENGTH_BIN = 10
 TRANSITION_SCORE_BINS = 10
+RAW_CURVE_WINDOW = 4000
+RAW_CURVE_MIN_PERIODS = 250
+RAW_SCATTER_SAMPLE_SIZE = 20000
+INTENT_FUTURE_WINDOW = 10
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT = SCRIPT_DIR.parent / "pcsar_intent_features_test_full.csv"
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR.parent / "output"
@@ -235,6 +239,160 @@ def consecutive_jsd(pi_matrix: np.ndarray) -> np.ndarray:
     return np.array([js_distance(a, b) for a, b in zip(pi_matrix[:-1], pi_matrix[1:])], dtype=float)
 
 
+def build_intent_future_scores(df: pd.DataFrame, user_key: str, future_window: int = INTENT_FUTURE_WINDOW) -> pd.DataFrame:
+    pi_cols = pi_columns(df, "global_pi_")
+    if not pi_cols:
+        raise KeyError("Could not find global_pi_* columns in the input CSV.")
+
+    rows = []
+    for user_id, g in df.groupby(user_key, sort=False):
+        g = g.reset_index(drop=True)
+        if len(g) <= 1:
+            continue
+
+        exploration = pd.to_numeric(g["exploration_score"], errors="coerce").to_numpy(dtype=float)
+        pi = g[pi_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(dtype=float)
+
+        for i in range(len(g)):
+            if not np.isfinite(exploration[i]):
+                continue
+            future = pi[i + 1 : i + 1 + future_window]
+            if len(future) < 1:
+                continue
+            future_center = future.mean(axis=0)
+            intent_future_consistency = float(1.0 - js_distance(pi[i], future_center))
+            intent_future_expansion = float(np.mean([js_distance(cur, future_center) for cur in future]))
+            rows.append(
+                {
+                    user_key: user_id,
+                    "exploration_score": float(exploration[i]),
+                    "intent_future_consistency": intent_future_consistency,
+                    "intent_future_expansion": intent_future_expansion,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def summarize_intent_future_curves(df: pd.DataFrame) -> pd.DataFrame:
+    plot_df = df.dropna(subset=["exploration_score", "intent_future_consistency", "intent_future_expansion"]).copy()
+    plot_df = plot_df.sort_values("exploration_score").reset_index(drop=True)
+    if plot_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "exploration_score",
+                "intent_future_consistency_mean",
+                "intent_future_consistency_sem",
+                "intent_future_expansion_mean",
+                "intent_future_expansion_sem",
+                "events",
+            ]
+        )
+
+    consistency_roll = plot_df["intent_future_consistency"].rolling(
+        window=RAW_CURVE_WINDOW,
+        center=True,
+        min_periods=RAW_CURVE_MIN_PERIODS,
+    )
+    expansion_roll = plot_df["intent_future_expansion"].rolling(
+        window=RAW_CURVE_WINDOW,
+        center=True,
+        min_periods=RAW_CURVE_MIN_PERIODS,
+    )
+
+    consistency_count = consistency_roll.count().to_numpy(dtype=float)
+    expansion_count = expansion_roll.count().to_numpy(dtype=float)
+
+    summary = pd.DataFrame(
+        {
+            "exploration_score": plot_df["exploration_score"].to_numpy(dtype=float),
+            "intent_future_consistency_mean": consistency_roll.mean().to_numpy(dtype=float),
+            "intent_future_consistency_sem": (
+                consistency_roll.std(ddof=1).to_numpy(dtype=float)
+                / np.sqrt(np.maximum(consistency_count, 1.0))
+            ),
+            "intent_future_expansion_mean": expansion_roll.mean().to_numpy(dtype=float),
+            "intent_future_expansion_sem": (
+                expansion_roll.std(ddof=1).to_numpy(dtype=float)
+                / np.sqrt(np.maximum(expansion_count, 1.0))
+            ),
+            "events": np.ones(len(plot_df), dtype=int),
+        }
+    )
+    return summary.dropna(
+        subset=["intent_future_consistency_mean", "intent_future_expansion_mean"]
+    ).reset_index(drop=True)
+
+
+def plot_intent_future_curves(raw_df: pd.DataFrame, curves: pd.DataFrame, out_path: Path) -> None:
+    ensure_dir(out_path.parent)
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.8), sharex=True)
+
+    binned = raw_df.dropna(
+        subset=["exploration_score", "intent_future_consistency", "intent_future_expansion"]
+    ).copy()
+    if not binned.empty:
+        binned["intent_future_consistency_norm"] = normalize_series(binned["intent_future_consistency"].to_numpy(dtype=float))
+        binned["intent_future_expansion_norm"] = normalize_series(binned["intent_future_expansion"].to_numpy(dtype=float))
+    if not binned.empty:
+        binned["exploration_bin"] = pd.qcut(
+            binned["exploration_score"].rank(method="first"),
+            q=min(TRANSITION_SCORE_BINS, binned["exploration_score"].nunique()),
+            labels=False,
+            duplicates="drop",
+        )
+    else:
+        binned["exploration_bin"] = pd.Series(dtype=float)
+
+    panels = [
+        (
+            axes[0],
+            "intent_future_consistency_norm",
+            "Normalized Intent Future Consistency",
+        ),
+        (
+            axes[1],
+            "intent_future_expansion_norm",
+            "Normalized Intent Future Expansion",
+        ),
+    ]
+
+    for ax, raw_col, ylabel in panels:
+        curve_df = binned.dropna(subset=[raw_col]).copy()
+        curve_rows = []
+        for bin_id, g_bin in curve_df.groupby("exploration_bin", sort=True):
+            if len(g_bin) < MIN_BIN_SAMPLES:
+                continue
+            curve_rows.append(
+                {
+                    "exploration_bin": int(bin_id),
+                    raw_col: float(np.nanmean(g_bin[raw_col])),
+                    f"{raw_col}_sem": sem(g_bin[raw_col]),
+                }
+            )
+        curve_plot = pd.DataFrame(curve_rows).sort_values("exploration_bin")
+        if not curve_plot.empty:
+            ax.errorbar(
+                curve_plot["exploration_bin"].to_numpy(dtype=float) + 1.0,
+                curve_plot[raw_col],
+                yerr=1.96 * curve_plot[f"{raw_col}_sem"],
+                linewidth=2.2,
+                color="#1f77b4",
+                marker="o",
+            )
+        ax.set_xlabel("Exploration Score Bin")
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.25)
+        ax.set_xticks(np.arange(1, TRANSITION_SCORE_BINS + 1))
+        ax.set_xlim(0.8, TRANSITION_SCORE_BINS + 0.2)
+
+    axes[0].set_title("Intent Future Consistency")
+    axes[1].set_title("Intent Future Expansion")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
 def build_user_summary(df: pd.DataFrame, user_key: str) -> pd.DataFrame:
     pi_cols = pi_columns(df, "global_pi_")
     if not pi_cols:
@@ -373,7 +531,6 @@ def build_transition_summary(df: pd.DataFrame, user_key: str) -> pd.DataFrame:
         if len(g) < 2:
             continue
 
-        dom = pd.to_numeric(g["global_dominant_intent"], errors="coerce").fillna(-1).to_numpy()
         uncertainty = pd.to_numeric(g["belief_uncertainty"], errors="coerce").to_numpy()
         attr_gap = pd.to_numeric(g["attribution_confidence_gap"], errors="coerce").to_numpy()
         proxy = g[proxy_col].astype(str).replace("nan", np.nan).to_numpy()
@@ -384,13 +541,16 @@ def build_transition_summary(df: pd.DataFrame, user_key: str) -> pd.DataFrame:
             cur_proxy = proxy[i]
             if pd.isna(prev_proxy) or pd.isna(cur_proxy):
                 continue
+            consecutive_intent_consistency = float(1.0 - js_distance(pi[i - 1], pi[i]))
+            consecutive_intent_shift = float(1.0 - consecutive_intent_consistency)
             rows.append(
                 {
                     user_key: user_id,
                     "exploration_score": float(g["exploration_score"].iloc[i]),
                     "anchor_transition": f"{prev_proxy}->{cur_proxy}",
-                    "intent_shift": js_distance(pi[i - 1], pi[i]),
-                    "dominant_intent_change_rate": float(dom[i - 1] != dom[i]),
+                    "consecutive_intent_consistency": consecutive_intent_consistency,
+                    "consecutive_intent_shift": consecutive_intent_shift,
+                    "rec_src_intent_shift_js": float(g["rec_src_intent_shift_js"].iloc[i]),
                     "uncertainty": float(uncertainty[i]),
                     "attribution_shift": float(abs(attr_gap[i] - attr_gap[i - 1])),
                 }
@@ -448,6 +608,73 @@ def aggregate_transition_score_lines(
         .sort_values(["anchor_transition", "score_bin"])
         .reset_index(drop=True)
     )
+
+
+def summarize_intent_shift_curve(summary: pd.DataFrame, score_col: str, shift_col: str) -> pd.DataFrame:
+    plot_df = summary.dropna(subset=[score_col, shift_col]).copy()
+    plot_df = plot_df.sort_values(score_col).reset_index(drop=True)
+    if plot_df.empty:
+        return pd.DataFrame(columns=[score_col, f"{shift_col}_mean", f"{shift_col}_sem", "events"])
+
+    shift_roll = plot_df[shift_col].rolling(
+        window=RAW_CURVE_WINDOW,
+        center=True,
+        min_periods=RAW_CURVE_MIN_PERIODS,
+    )
+    shift_count = shift_roll.count().to_numpy(dtype=float)
+    out = pd.DataFrame({
+        score_col: plot_df[score_col].to_numpy(dtype=float),
+        f"{shift_col}_mean": shift_roll.mean().to_numpy(dtype=float),
+        f"{shift_col}_sem": (
+            shift_roll.std(ddof=1).to_numpy(dtype=float) / np.sqrt(np.maximum(shift_count, 1.0))
+        ),
+        "events": np.ones(len(plot_df), dtype=int),
+    })
+    return out.dropna(subset=[f"{shift_col}_mean"]).reset_index(drop=True)
+
+
+def summarize_binned_intent_shift(
+    df: pd.DataFrame,
+    score_col: str,
+    shift_col: str,
+    n_bins: int = TRANSITION_SCORE_BINS,
+) -> pd.DataFrame:
+    valid = df.dropna(subset=[score_col, shift_col]).copy()
+    if valid.empty:
+        return pd.DataFrame(
+            columns=[
+                "score_bin",
+                "exploration_score_bin_center",
+                f"{shift_col}_mean",
+                f"{shift_col}_sem",
+                "n",
+            ]
+        )
+
+    valid["score_bin"] = pd.qcut(
+        valid[score_col].rank(method="first"),
+        q=min(n_bins, valid[score_col].nunique()),
+        labels=False,
+        duplicates="drop",
+    )
+    if valid["score_bin"].isna().all():
+        return pd.DataFrame()
+
+    rows = []
+    for bin_id, g_bin in valid.groupby("score_bin", sort=True):
+        if len(g_bin) < MIN_BIN_SAMPLES:
+            continue
+        rows.append(
+            {
+                "score_bin": int(bin_id),
+                "exploration_score_bin_center": float(np.nanmean(g_bin[score_col])),
+                f"{shift_col}_mean": float(np.nanmean(g_bin[shift_col])),
+                f"{shift_col}_sem": sem(g_bin[shift_col]),
+                "n": int(len(g_bin)),
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values("score_bin").reset_index(drop=True)
 
 
 def decile_summary(df: pd.DataFrame, score_col: str) -> pd.DataFrame:
@@ -584,37 +811,66 @@ def plot_stacked_lines(
     plt.close(fig)
 
 
-def plot_transition_score_lines(summary: pd.DataFrame, out_path: Path) -> None:
+def plot_transition_score_lines(
+    raw_summary: pd.DataFrame,
+    transition_summary: pd.DataFrame,
+    out_path: Path,
+) -> None:
     ensure_dir(out_path.parent)
-    fig, ax = plt.subplots(1, 1, figsize=(9.6, 6.0))
+    overall_curve = summarize_binned_intent_shift(
+        raw_summary,
+        "exploration_score",
+        "consecutive_intent_shift",
+        n_bins=TRANSITION_SCORE_BINS,
+    )
 
-    for transition in TRANSITION_ORDER:
-        g = summary[summary["anchor_transition"] == transition].sort_values("score_bin")
-        if g.empty:
-            continue
-        x = g["score_bin"].to_numpy(dtype=float) + 1.0
-        y = g["intent_shift_mean"].to_numpy(dtype=float)
-        y_sem = g["intent_shift_sem"].to_numpy(dtype=float)
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.8))
+
+    ax = axes[0]
+    if not overall_curve.empty:
         ax.errorbar(
-            x,
-            y,
-            yerr=1.96 * y_sem,
-            color=TRANSITION_COLORS[transition],
-            marker="o",
+            overall_curve["score_bin"].to_numpy(dtype=float) + 1.0,
+            overall_curve["consecutive_intent_shift_mean"],
+            yerr=1.96 * overall_curve["consecutive_intent_shift_sem"],
             linewidth=2.2,
-            markersize=5,
-            label=transition,
+            color="#1f77b4",
+            marker="o",
         )
+        ax.set_xticks(np.arange(1, TRANSITION_SCORE_BINS + 1))
+        ax.set_xlim(0.8, TRANSITION_SCORE_BINS + 0.2)
+        ax.set_xlabel("Exploration Score Bin")
+        ax.set_ylabel("Intent Shift")
+        ax.grid(alpha=0.25)
 
-    ax.set_xlabel("Exploration score bin")
-    ax.set_ylabel("Mean intent shift")
-    ax.set_title("Transition Type -> Intent Shift", loc="left", fontsize=13, weight="bold")
-    ax.grid(alpha=0.25)
-    ax.set_xticks(np.arange(1, TRANSITION_SCORE_BINS + 1))
-    ax.set_xlim(0.8, TRANSITION_SCORE_BINS + 0.2)
-    ax.legend(frameon=False, ncol=2)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+    for ax in [axes[1]]:
+        for transition in TRANSITION_ORDER:
+            g = transition_summary[transition_summary["anchor_transition"] == transition].sort_values("score_bin")
+            if g.empty:
+                continue
+            x = g["score_bin"].to_numpy(dtype=float) + 1.0
+            y = g["consecutive_intent_shift_mean"].to_numpy(dtype=float)
+            y_sem = g["consecutive_intent_shift_sem"].to_numpy(dtype=float)
+            ax.errorbar(
+                x,
+                y,
+                yerr=1.96 * y_sem,
+                color=TRANSITION_COLORS[transition],
+                marker="o",
+                linewidth=2.2,
+                markersize=5,
+                label=transition,
+            )
+
+        ax.set_xlabel("Exploration Score Bin")
+        ax.set_ylabel("Intent Shift")
+        ax.grid(alpha=0.25)
+        ax.set_xticks(np.arange(1, TRANSITION_SCORE_BINS + 1))
+        ax.set_xlim(0.8, TRANSITION_SCORE_BINS + 0.2)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+    axes[0].spines["top"].set_visible(False)
+    axes[0].spines["right"].set_visible(False)
+    axes[1].legend(frameon=False, ncol=2)
     fig.tight_layout()
     fig.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -680,16 +936,28 @@ def main() -> None:
         None,
     )
 
+    fig5_dir = output_root / "5"
+    intent_future_raw = build_intent_future_scores(df, args.user_key)
+    save_table(intent_future_raw, fig5_dir / "intent_future_consistency_and_expansion.csv")
+    intent_future_summary = summarize_intent_future_curves(intent_future_raw)
+    save_table(intent_future_summary, fig5_dir / "intent_future_consistency_and_expansion_curve.csv")
+    plot_intent_future_curves(
+        intent_future_raw,
+        intent_future_summary,
+        fig5_dir / "intent_future_consistency_and_expansion.png",
+    )
+
     fig4_dir = output_root / "4"
     transition_summary = build_transition_summary(df, args.user_key)
     transition_score_summary = aggregate_transition_score_lines(
         transition_summary,
         "exploration_score",
-        ["intent_shift"],
+        ["consecutive_intent_shift"],
         n_bins=TRANSITION_SCORE_BINS,
     )
     save_table(transition_score_summary, fig4_dir / "transition_type_intent_shift.csv")
     plot_transition_score_lines(
+        transition_summary,
         transition_score_summary,
         fig4_dir / "transition_type_intent_shift.png",
     )
