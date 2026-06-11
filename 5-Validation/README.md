@@ -86,7 +86,7 @@ Compares the three PC-SAR variants.
 - `output_ablation/state/state_shock_summary.png`
 - `output_ablation/attribution/transition_events.csv`
 - `output_ablation/attribution/transition_summary.csv`
-- `output_ablation/attribution/transition_exploration_summary.csv`
+- `output_ablation/attribution/transition_prediction_score_gap_summary.csv`
 - `output_ablation/attribution/transition_gap.csv`
 - `output_ablation/attribution/transition_summary.png`
 

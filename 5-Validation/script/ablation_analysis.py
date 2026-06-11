@@ -14,13 +14,13 @@ import matplotlib.pyplot as plt
 
 VARIANT_LABELS = {
     "full": "Full",
-    "no_intent_state": "w/o state + temp",
+    "no_intent_state": "w/o transition state",
     "no_counterfactual": "w/o attribution",
 }
 VARIANT_COLORS = {
     "full": "#1f77b4",
     "no_intent_state": "#ff7f0e",
-    "no_counterfactual": "#2ca02c",
+    "no_counterfactual": "#ff7f0e",
 }
 STATE_VARIANTS = ["full", "no_intent_state"]
 ATTR_VARIANTS = ["full", "no_counterfactual"]
@@ -30,10 +30,10 @@ TRANSITION_METRICS = [
     "adoption_rate",
     "future_consistency",
     "cross_channel_gain",
+    "source_prediction_score_gap",
     "anchor_similarity",
 ]
-TRANSITION_PLOT_METRIC = "intent_shift"
-EXPLORATION_BIN_COUNT = 10
+CONTRIBUTION_GROUP_ORDER = ["Same-channel", "Cross-channel"]
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT_ROOT = SCRIPT_DIR.parent
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR.parent / "output_ablation"
@@ -92,21 +92,28 @@ def resolve_variant(path: Path) -> str | None:
     stem = path.stem
     if stem.endswith("old"):
         return None
-    if stem.endswith("full"):
+    if stem.endswith("full") or stem.endswith("full_mechanism"):
         return "full"
-    if stem.endswith("no_intent_state"):
+    if stem.endswith("no_intent_state") or stem.endswith("no_intent"):
         return "no_intent_state"
-    if stem.endswith("no_counterfactual"):
+    if stem.endswith("no_counterfactual") or stem.endswith("full_mechanism_no_counterfactual"):
         return "no_counterfactual"
     return None
 
 
 def discover_variant_files(root: Path) -> dict[str, Path]:
     variant_files: dict[str, Path] = {}
-    for path in sorted(root.glob("pcsar_intent_features_test*.csv")):
-        variant = resolve_variant(path)
-        if variant is not None:
-            variant_files[variant] = path
+    patterns = [
+        "pcsar_intent_features_test*.csv",
+        "Features/**/*.csv",
+        "Old_features/*.csv",
+    ]
+    for pattern in patterns:
+        paths = sorted(root.glob(pattern))
+        for path in paths:
+            variant = resolve_variant(path)
+            if variant is not None and variant not in variant_files:
+                variant_files[variant] = path
     return variant_files
 
 
@@ -481,7 +488,6 @@ def evaluate_state_events(events: pd.DataFrame, df: pd.DataFrame, variant: str) 
         post_to_history = safe_cosine(post_rec, shock_history)
         shock_resistance = post_to_history - post_to_shock
         preference_margin = post_to_history - safe_cosine(shock_rec, shock_item)
-
         rows.append(
             {
                 "variant": variant,
@@ -522,9 +528,30 @@ def evaluate_transition_events(events: pd.DataFrame, df: pd.DataFrame, variant: 
             str(cur.get("attribution_source_proxy", "")).upper()
             == str(cur.get("channel", "")).upper()
         )
-        cross_channel_gain = float(cur.get("rec_pred_pos_score", np.nan)) - float(
-            cur.get("src_pred_pos_score", np.nan)
+        channel = str(cur.get("channel", "")).upper()
+        rec_pos_score = float(cur.get("rec_pred_pos_score", np.nan))
+        src_pos_score = float(cur.get("src_pred_pos_score", np.nan))
+        cross_channel_gain = rec_pos_score - src_pos_score
+        if channel == "R":
+            same_source_score = rec_pos_score
+            cross_source_score = src_pos_score
+        elif channel == "S":
+            same_source_score = src_pos_score
+            cross_source_score = rec_pos_score
+        else:
+            same_source_score = np.nan
+            cross_source_score = np.nan
+        same_minus_cross_contribution = same_source_score - cross_source_score
+        is_cross_transition = "->" in str(event["transition_type"]) and (
+            str(event["transition_type"]).split("->")[0] != str(event["transition_type"]).split("->")[1]
         )
+        if is_cross_transition:
+            relevant_source_contribution = cross_source_score
+            irrelevant_source_contribution = same_source_score
+        else:
+            relevant_source_contribution = same_source_score
+            irrelevant_source_contribution = cross_source_score
+        source_prediction_score_gap = abs(relevant_source_contribution - irrelevant_source_contribution)
 
         rows.append(
             {
@@ -534,8 +561,9 @@ def evaluate_transition_events(events: pd.DataFrame, df: pd.DataFrame, variant: 
                 "timestamp": float(cur.get("timestamp", np.nan)),
                 "item_id": int(cur.get("item_id", -1)) if pd.notna(cur.get("item_id", np.nan)) else np.nan,
                 "search_session_id": int(cur.get("search_session_id", -1)) if pd.notna(cur.get("search_session_id", np.nan)) else np.nan,
-                "channel": str(cur.get("channel", "")).upper(),
+                "channel": channel,
                 "transition_type": event["transition_type"],
+                "transition_group": "Cross-channel" if is_cross_transition else "Same-channel",
                 "exploration_score": float(event["exploration_score"]),
                 "anchor_sample_index": (
                     int(event["anchor_sample_index"]) if pd.notna(event["anchor_sample_index"]) else np.nan
@@ -551,6 +579,12 @@ def evaluate_transition_events(events: pd.DataFrame, df: pd.DataFrame, variant: 
                 "adoption_rate": adoption_rate,
                 "future_consistency": future_consistency,
                 "cross_channel_gain": cross_channel_gain,
+                "same_source_score": same_source_score,
+                "cross_source_score": cross_source_score,
+                "same_minus_cross_contribution": same_minus_cross_contribution,
+                "relevant_source_contribution": relevant_source_contribution,
+                "irrelevant_source_contribution": irrelevant_source_contribution,
+                "source_prediction_score_gap": source_prediction_score_gap,
             }
         )
 
@@ -647,118 +681,125 @@ def save_table(df: pd.DataFrame, path: Path) -> None:
     df.to_csv(path, index=False)
 
 
-def plot_state_summary(df: pd.DataFrame, out_path: Path) -> None:
-    ensure_dir(out_path.parent)
-    fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.6), constrained_layout=True)
-    metrics = [
-        ("shock_resistance", "Exploration resistance"),
-        ("preference_margin", "Post-exploration preference margin"),
-    ]
-
+def plot_state_resistance_panel(ax, df: pd.DataFrame) -> None:
     x = np.arange(len(STATE_VARIANTS))
     labels = [VARIANT_LABELS[v] for v in STATE_VARIANTS]
+    metric = "shock_resistance"
+    title = "Exploration resistance"
+    means = []
+    sems = []
+    for variant in STATE_VARIANTS:
+        cur = df[df["variant"] == variant]
+        means.append(float(np.nanmean(cur[metric])) if not cur.empty else np.nan)
+        sems.append(sem(cur[metric]) if not cur.empty else np.nan)
+    ax.bar(x, means, color=[VARIANT_COLORS[v] for v in STATE_VARIANTS], alpha=0.88)
+    ax.errorbar(x, means, yerr=1.96 * np.asarray(sems), fmt="none", ecolor="#333333", capsize=4)
+    ax.scatter(x, means, s=24, color="#111111", zorder=3)
+    ax.set_xticks(x, labels)
+    ax.set_title(title, loc="center", fontsize=11, weight="normal")
+    ax.set_ylabel(title)
+    ax.grid(axis="y", alpha=0.25)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
 
-    for ax, (metric, title) in zip(axes, metrics):
+
+def plot_source_prediction_panel(ax, df: pd.DataFrame) -> None:
+    plot_df = summarize_prediction_score_gap(df)
+    if plot_df.empty:
+        ax.set_visible(False)
+        return
+    groups = [group for group in CONTRIBUTION_GROUP_ORDER if group in set(plot_df["transition_group"])]
+    x = np.arange(len(groups))
+    width = 0.36
+    for idx, variant in enumerate([variant for variant in ATTR_VARIANTS if variant in set(plot_df["variant"])]):
+        g = plot_df[plot_df["variant"] == variant].set_index("transition_group").reindex(groups)
+        means = g["source_prediction_score_gap_mean"].to_numpy(dtype=float)
+        sems = g["source_prediction_score_gap_sem"].to_numpy(dtype=float)
+        xpos = x + (idx - 0.5) * width
+        ax.bar(
+            xpos,
+            means,
+            width=width,
+            color=VARIANT_COLORS[variant],
+            alpha=0.88,
+            label=VARIANT_LABELS[variant],
+        )
+        ax.errorbar(xpos, means, yerr=1.96 * sems, fmt="none", ecolor="#333333", capsize=4)
+        ax.scatter(xpos, means, s=24, color="#111111", zorder=3)
+    ax.set_xticks(x, groups)
+    ax.set_title("Source prediction score differentiation", loc="center", fontsize=11, weight="normal")
+    ax.set_ylabel("Absolute source prediction score gap")
+    ax.set_ylim(0, 0.7)
+    ax.grid(axis="y", alpha=0.25)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(frameon=False)
+
+
+def plot_state_summary(df: pd.DataFrame, out_path: Path, transition_df: pd.DataFrame | None = None) -> None:
+    ensure_dir(out_path.parent)
+    fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.6), constrained_layout=True)
+    plot_state_resistance_panel(axes[0], df)
+    if transition_df is None:
+        metric = "preference_margin"
+        title = "Post-exploration preference margin"
+        x = np.arange(len(STATE_VARIANTS))
+        labels = [VARIANT_LABELS[v] for v in STATE_VARIANTS]
         means = []
         sems = []
         for variant in STATE_VARIANTS:
             cur = df[df["variant"] == variant]
             means.append(float(np.nanmean(cur[metric])) if not cur.empty else np.nan)
             sems.append(sem(cur[metric]) if not cur.empty else np.nan)
-        ax.bar(x, means, color=[VARIANT_COLORS[v] for v in STATE_VARIANTS], alpha=0.88)
-        ax.errorbar(x, means, yerr=1.96 * np.asarray(sems), fmt="none", ecolor="#333333", capsize=4)
-        ax.scatter(x, means, s=24, color="#111111", zorder=3)
-        ax.set_xticks(x, labels)
-        ax.set_title(title, loc="left", fontsize=12, weight="bold")
-        ax.grid(axis="y", alpha=0.25)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
+        axes[1].bar(x, means, color=[VARIANT_COLORS[v] for v in STATE_VARIANTS], alpha=0.88)
+        axes[1].errorbar(x, means, yerr=1.96 * np.asarray(sems), fmt="none", ecolor="#333333", capsize=4)
+        axes[1].scatter(x, means, s=24, color="#111111", zorder=3)
+        axes[1].set_xticks(x, labels)
+        axes[1].set_title(title, loc="center", fontsize=11, weight="normal")
+        axes[1].grid(axis="y", alpha=0.25)
+        axes[1].spines["top"].set_visible(False)
+        axes[1].spines["right"].set_visible(False)
+    else:
+        plot_source_prediction_panel(axes[1], transition_df)
 
     fig.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
 
 
-def assign_exploration_bins(df: pd.DataFrame, n_bins: int = EXPLORATION_BIN_COUNT) -> pd.DataFrame:
-    df = df.copy()
-    if df.empty:
-        df["exploration_bin"] = pd.Series(dtype=int)
-        return df
-
-    scores = df["exploration_score"].astype(float)
-    try:
-        bins = pd.qcut(scores.rank(method="first"), q=n_bins, labels=False, duplicates="drop")
-    except ValueError:
-        bins = pd.Series(np.zeros(len(df), dtype=int), index=df.index)
-
-    bins = pd.Series(bins, index=df.index).astype("Int64") + 1
-    if bins.notna().any():
-        bins = bins.fillna(int(bins.dropna().max()))
-    df["exploration_bin"] = bins.astype(int)
-    return df
-
-
-def summarize_binned_metric(
-    df: pd.DataFrame,
-    metric: str,
-    transition_col: str = "transition_type",
-) -> pd.DataFrame:
+def summarize_prediction_score_gap(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    for keys, g in df.groupby(["variant", transition_col, "exploration_bin"], sort=False):
-        variant, transition_type, exploration_bin = keys
+    valid = df.dropna(subset=["source_prediction_score_gap", "transition_group"]).copy()
+    for (variant, transition_group), g in valid.groupby(["variant", "transition_group"], sort=False):
         rows.append(
             {
                 "variant": variant,
-                "transition_type": transition_type,
-                "exploration_bin": int(exploration_bin),
+                "transition_group": transition_group,
                 "n": int(len(g)),
-                f"{metric}_mean": mean_or_nan(g[metric]),
-                f"{metric}_sem": sem(g[metric]),
+                "source_prediction_score_gap_mean": mean_or_nan(g["source_prediction_score_gap"]),
+                "source_prediction_score_gap_sem": sem(g["source_prediction_score_gap"]),
+                "relevant_source_contribution_mean": mean_or_nan(g["relevant_source_contribution"]),
+                "relevant_source_contribution_sem": sem(g["relevant_source_contribution"]),
+                "irrelevant_source_contribution_mean": mean_or_nan(g["irrelevant_source_contribution"]),
+                "irrelevant_source_contribution_sem": sem(g["irrelevant_source_contribution"]),
             }
         )
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out["_variant_order"] = out["variant"].map({variant: idx for idx, variant in enumerate(ATTR_VARIANTS)}).fillna(99)
+        out["_group_order"] = out["transition_group"].map(
+            {group: idx for idx, group in enumerate(CONTRIBUTION_GROUP_ORDER)}
+        ).fillna(99)
+        out = out.sort_values(["_variant_order", "_group_order"]).drop(
+            columns=["_variant_order", "_group_order"]
+        ).reset_index(drop=True)
+    return out
 
 
 def plot_transition_summary(df: pd.DataFrame, out_path: Path) -> None:
     ensure_dir(out_path.parent)
-    df = assign_exploration_bins(df)
-    transition_col = "transition_type_plot" if "transition_type_plot" in df.columns else "transition_type"
-    plot_df = summarize_binned_metric(df, TRANSITION_PLOT_METRIC, transition_col=transition_col)
-    fig, axes = plt.subplots(2, 2, figsize=(12.0, 8.4), sharex=True, constrained_layout=True)
-    axes = axes.flatten()
-
-    x_bins = np.arange(1, EXPLORATION_BIN_COUNT + 1)
-    transition_order = TRANSITION_ORDER if "R->R" in set(plot_df["transition_type"].astype(str).unique()) else [t for t in TRANSITION_ORDER if t != "R->R"]
-    for ax, transition_type in zip(axes, transition_order):
-        for variant in [v for v in plot_df["variant"].dropna().unique().tolist() if v in VARIANT_LABELS]:
-            g = plot_df[(plot_df["variant"] == variant) & (plot_df["transition_type"] == transition_type)]
-            if g.empty:
-                y = [np.nan] * len(x_bins)
-            else:
-                curve = (
-                    g.set_index("exploration_bin")[[f"{TRANSITION_PLOT_METRIC}_mean"]]
-                    .reindex(x_bins)
-                    .astype(float)
-                )
-                curve = curve.interpolate(method="linear", limit_direction="both")
-                y = curve[f"{TRANSITION_PLOT_METRIC}_mean"].to_numpy(dtype=float)
-            ax.plot(
-                x_bins,
-                y,
-                marker="o",
-                linewidth=2.1,
-                color=VARIANT_COLORS[variant],
-                label=VARIANT_LABELS[variant],
-            )
-
-        ax.set_title(transition_type, loc="left", fontsize=12, weight="bold")
-        ax.set_xticks(x_bins)
-        ax.set_xlabel("Exploration score bin")
-        ax.set_ylabel("Intent shift")
-        ax.grid(axis="y", alpha=0.25)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-
-    axes[0].legend(frameon=False)
+    fig, ax = plt.subplots(1, 1, figsize=(7.6, 4.9), constrained_layout=True)
+    plot_source_prediction_panel(ax, df)
+    ax.set_xlabel("Transition Group")
     fig.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
 
@@ -832,7 +873,6 @@ def main() -> None:
         ],
     )
     save_table(state_summary, output_root / "state" / "state_summary.csv")
-    plot_state_summary(state_df, output_root / "state" / "state_shock_summary.png")
 
     transition_tables = []
     for variant in ATTR_VARIANTS:
@@ -844,15 +884,14 @@ def main() -> None:
     transition_summary = summarize(transition_df, ["variant", transition_group_col], TRANSITION_METRICS)
     transition_summary = transition_summary.rename(columns={transition_group_col: "transition_type"})
     save_table(transition_summary, output_root / "attribution" / "transition_summary.csv")
-    transition_binned = assign_exploration_bins(transition_df)
-    transition_binned_summary = summarize_binned_metric(
-        transition_binned,
-        TRANSITION_PLOT_METRIC,
-        transition_col=transition_group_col,
+    transition_prediction_score_gap_summary = summarize_prediction_score_gap(transition_df)
+    save_table(
+        transition_prediction_score_gap_summary,
+        output_root / "attribution" / "transition_prediction_score_gap_summary.csv",
     )
-    save_table(transition_binned_summary, output_root / "attribution" / "transition_exploration_summary.csv")
     transition_gap = build_transition_gap(transition_df, transition_col=transition_group_col)
     save_table(transition_gap, output_root / "attribution" / "transition_gap.csv")
+    plot_state_summary(state_df, output_root / "state" / "state_shock_summary.png", transition_df=transition_df)
     plot_transition_summary(transition_df, output_root / "attribution" / "transition_summary.png")
 
     print(f"Saved ablation analysis under: {output_root.resolve()}")
