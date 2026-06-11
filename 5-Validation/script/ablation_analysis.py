@@ -685,7 +685,7 @@ def plot_state_resistance_panel(ax, df: pd.DataFrame) -> None:
     x = np.arange(len(STATE_VARIANTS))
     labels = [VARIANT_LABELS[v] for v in STATE_VARIANTS]
     metric = "shock_resistance"
-    title = "Exploration resistance"
+    title = "Exploration Resistance"
     means = []
     sems = []
     for variant in STATE_VARIANTS:
@@ -727,8 +727,8 @@ def plot_source_prediction_panel(ax, df: pd.DataFrame) -> None:
         ax.errorbar(xpos, means, yerr=1.96 * sems, fmt="none", ecolor="#333333", capsize=4)
         ax.scatter(xpos, means, s=24, color="#111111", zorder=3)
     ax.set_xticks(x, groups)
-    ax.set_title("Source prediction score differentiation", loc="center", fontsize=11, weight="normal")
-    ax.set_ylabel("Absolute source prediction score gap")
+    ax.set_title("Channel Prediction Score Gap", loc="center", fontsize=11, weight="normal")
+    ax.set_ylabel("Channel Prediction Score Gap")
     ax.set_ylim(0, 0.7)
     ax.grid(axis="y", alpha=0.25)
     ax.spines["top"].set_visible(False)

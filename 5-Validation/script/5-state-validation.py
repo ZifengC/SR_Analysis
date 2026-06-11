@@ -867,7 +867,7 @@ def plot_uncertainty_summary(summary: pd.DataFrame, out_path: Path) -> None:
         ax.set_xticks(x, plot_df["state"].tolist())
         ax.set_title(title)
         ax.set_ylabel(title)
-        ax.set_xlabel("Inferred Uncertainty State")
+        ax.set_xlabel("Explorative Transition State")
         ax.grid(axis="y", alpha=0.25)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -884,7 +884,7 @@ def plot_transition_summary(summary: pd.DataFrame, intent_dominance_summary: pd.
     x = np.arange(len(bins))
     width = 0.36
     fig, ax = plt.subplots(1, 1, figsize=(7.4, 4.8), constrained_layout=True)
-    channel_specs = [("R", "Target R", "#1f77b4", -width / 2), ("S", "Target S", "#9ecae1", width / 2)]
+    channel_specs = [("R", "Recommendation", "#1f77b4", -width / 2), ("S", "Search", "#9ecae1", width / 2)]
     for channel, label, color, offset in channel_specs:
         plot_df = (
             intent_dominance_summary[intent_dominance_summary["channel"] == channel]
@@ -899,9 +899,9 @@ def plot_transition_summary(summary: pd.DataFrame, intent_dominance_summary: pd.
         ax.bar(xpos, means, width=width, color=color, alpha=0.88, label=label)
         ax.errorbar(xpos, means, yerr=1.96 * sems, fmt="none", ecolor="#333333", capsize=4)
     ax.set_xticks(x, bins)
-    ax.set_title("Cross-source Attribution Gate")
-    ax.set_ylabel("Cross-source Attribution Gate")
-    ax.set_xlabel("Cross-Source Intent Dominance")
+    ax.set_title("Cross-channel Attribution Gate")
+    ax.set_ylabel("Cross-channel Attribution Gate")
+    ax.set_xlabel("Cross-Channel Intent Dominance")
     ax.grid(axis="y", alpha=0.25)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
