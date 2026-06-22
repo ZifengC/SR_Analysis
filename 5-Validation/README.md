@@ -1,151 +1,253 @@
-# PC-SAR Validation
+# PC-SAR Component Internal Validation
 
-This folder contains the validation and ablation analysis for PC-SAR.
+`5-Validation/` 用于验证 PC-SAR 内部 component 是否按预期工作。这里关注两类
+问题：
 
-Its role is downstream of the `RelSAR` codebase:
+1. 完整模型内部的 intent state、uncertainty 和 attribution gate 是否具有可解释
+   的行为关系。
+2. 移除 intent-state 或 counterfactual-attribution component 后，模型内部行为如何
+   改变。
 
-- `RelSAR/test.py` exports the model feature table for the test split.
-- The scripts in this folder read those exports and summarize how the PC-SAR internals behave.
-- The outputs are CSV tables and plots used for interpretation, ablation comparison, and reporting.
+本目录不训练模型。所有模型特征都由上游 `RelSAR/test.py` 导出，再由本目录的
+两个分析脚本读取。
 
-## Relationship to `RelSAR`
+## 与其他分析模块的边界
 
-`RelSAR/` is the upstream implementation that generates the exported validation data.
+- `2-Problem-identify/`：从真实行为 embedding 中发现 exploration 和
+  consolidation 现象。
+- `3-Intent/`：验证 latent intent representation 是否呈现这些现象。
+- `5-Validation/`：验证产生 intent representation 的模型 component 和内部机制。
 
-In particular:
+因此，`3-Intent` 验证“intent 表征了什么”，本目录验证“模型 component 是否按
+预期构造并使用这些 intent”。
 
-- `RelSAR/test.py` runs the trained model on a dataset split and writes a flattened feature table.
-- The exported table contains intent posteriors, belief/uncertainty diagnostics, attribution proxies, prediction scores, embeddings, and metadata.
-- This folder does not train the model. It only analyzes the exported PC-SAR features.
+## 目录结构
 
-## Main Input Files
+```text
+5-Validation/
+  Features/
+    intermediate/
+    intermediate_no_intent/
+    intermediate_no_counterfactual/
+  Old_features/
+  script/
+    mechanism_validation.py
+    ablation_analysis.py
+  output_mechanism/
+    event_level/
+    state_validation/
+    attribution_validation/
+  output_ablation/
+```
 
-The core inputs are three test-set exports with the same schema:
+## 输入 CSV 的来源
+
+### Mechanism validation 导出
+
+`mechanism_validation.py` 默认使用 `Features/` 下由 `RelSAR/test.py` 导出的
+flattened mechanism feature table：
+
+- `Features/intermediate/pcsar_intent_features_all_full_mechanism.csv`
+
+该 CSV 包含 mechanism validation 所需的 intent posterior、uncertainty、gate、
+prediction 和 metadata，但不包含 ablation analysis 所需的 embedding vectors。
+
+`Features/` 还保存两个采用相同 131-column schema 的 component 变体：
+
+| 模型版本 | CSV | 上游配置含义 |
+| --- | --- | --- |
+| `full` | `Features/intermediate/pcsar_intent_features_all_full_mechanism.csv` | 完整 PC-SAR，intent state 与 counterfactual attribution 均启用 |
+| `no_intent_state` | `Features/intermediate_no_intent/pcsar_intent_features_all_full_mechanism_no_intent.csv` | 关闭 intent-state 相关 component |
+| `no_counterfactual` | `Features/intermediate_no_counterfactual/pcsar_intent_features_all_full_mechanism_no_counterfactual.csv` | 关闭 counterfactual attribution |
+
+`Features/intermediate/pcsar_user_trajectory.csv` 是同一导出流程产生的用户轨迹
+文件，但当前两个验证脚本不直接读取它。
+
+### Ablation validation 导出
+
+`ablation_analysis.py` 当前使用 `Old_features/` 下由较完整 export schema 产生的
+三份 test-set CSV：
 
 - `pcsar_intent_features_test_full.csv`
 - `pcsar_intent_features_test_no_intent_state.csv`
 - `pcsar_intent_features_test_no_counterfactual.csv`
 
-These files are generated from the same test split but with different model settings:
+每份 CSV 有 836 columns，除 scalar diagnostics 与 intent posteriors 外，还包含
+64 维的：
 
-- `full`: all PC-SAR components enabled
-- `no_intent_state`: intent-state bias and uncertainty-attention components disabled
-- `no_counterfactual`: counterfactual attribution disabled
+- `pos_item_emb_*`、`query_emb_*`
+- `rec_user_feat_*`、`rec_history_mean_emb_*`
+- `shared_user_feat_*`
 
-The three files are used to compare how PC-SAR behavior changes when one component is removed.
+这些向量是 semantic anchor、state resistance 和 future consistency 计算所必需
+的，因此 ablation 不能使用缺少 embedding columns 的新 `Features/` CSV。
+脚本会检查候选文件 schema，并自动跳过不满足这些要求的 CSV。
 
-## What Is Inside the CSVs
+### 关键字段
 
-The CSVs are sample-level exports. Each row corresponds to one test example and includes:
+两个脚本主要使用：
 
-- model configuration flags
-- user and sample identifiers
-- search/recommendation channel information
-- history lengths and history shares
-- global/rec/src intent distributions
-- uncertainty and belief statistics
-- attribution proxies
-- prediction scores and ranks
-- embedding vectors and latent feature vectors
+- 标识与顺序：`user_id`、`sample_index`、`timestamp`、`channel`
+- 历史构成：`history_rec_share`、`history_src_share`
+- intent posterior：`global_pi_*`、`rec_pi_*`、`src_pi_*`
+- state diagnostics：`global_dominant_intent_prob`、`global_intent_entropy`、
+  `global_posterior_uncertainty`
+- attribution：`attribution_source_proxy`、gate 与 confidence 字段
+- prediction：rec/src positive score、rank 和 score-gap 字段
+- representation：item、history 和 user embedding vectors；若导出 top-k
+  embedding 则优先使用，否则代码回退到 user feature
 
-The important derived fields include:
+这些字段由 `RelSAR/test.py` 计算和导出，本目录只进行聚合、比较与绘图。
 
-- `history_rec_share`
-- `history_src_share`
-- `global_pi_*`, `rec_pi_*`, `src_pi_*`
-- `attribution_source_proxy`
-- `attribution_confidence_gap`
-- `rec_src_intent_shift_js`
+## Script 1: Mechanism Validation
 
-These are computed inside `RelSAR/test.py`, not inside the analysis scripts.
+### 目的
 
-## Scripts
+`script/mechanism_validation.py` 只读取完整模型：
 
-### `script/ablation_analysis.py`
+```text
+Features/intermediate/pcsar_intent_features_all_full_mechanism.csv
+```
 
-Compares the three PC-SAR variants.
+它验证完整 PC-SAR 内部机制，不比较消融版本。
 
-#### Inputs
+### 计算流程
 
-- `pcsar_intent_features_test_full.csv`
-- `pcsar_intent_features_test_no_intent_state.csv`
-- `pcsar_intent_features_test_no_counterfactual.csv`
-- optional raw trajectory CSV for transition relabeling
+```text
+full sample-level export
+  -> 合并为 user event-level intent trajectory
+  -> state / uncertainty 与未来 intent dynamics
+  -> transition attribution gate 与 intent dominance
+  -> output_mechanism/
+```
 
-#### What it does
+1. 将 sample-level rows 合并为有时间顺序的 search/recommendation events。
+2. 使用未来窗口计算 intent consistency 和 dispersion。
+3. 将 uncertainty、entropy、confidence 分为 Low/Medium/High 状态。
+4. 比较不同状态下的未来行为指标。
+5. 构造 `R->R`、`R->S`、`S->R`、`S->S` transition，并验证 attribution gate。
 
-- compares the `full` variant against the `no_intent_state` variant
-- compares the `full` variant against the `no_counterfactual` variant
-- aggregates state-level and transition-level summaries
-- produces ablation tables and figures
+### 输出 CSV 及其来源
 
-#### Outputs
+| 输出 CSV | 来源与用途 |
+| --- | --- |
+| `output_mechanism/event_level/model_events.csv` | 从完整模型 sample-level export 合并得到的 event-level 表；同时是 `3-Intent/script/intent_tsne.py` 的输入 |
+| `output_mechanism/state_validation/state_validation_summary.csv` | 从 event-level state events 按 state metric 和 Low/Medium/High 分组汇总 |
+| `output_mechanism/state_validation/state_validation_high_low_differences.csv` | 由 state summary 进一步计算 High minus Low 差异 |
+| `output_mechanism/attribution_validation/transition_summary.csv` | 从相邻 event transitions 按 transition type 汇总 attribution 与 prediction 指标 |
+| `output_mechanism/attribution_validation/attribution_intent_dominance_by_target_summary.csv` | 从 transition events 按 target channel 和 intent-dominance 状态汇总 gate |
 
-- `output_ablation/state/state_shock_events.csv`
-- `output_ablation/state/state_summary.csv`
-- `output_ablation/state/state_shock_summary.png`
-- `output_ablation/attribution/transition_events.csv`
-- `output_ablation/attribution/transition_summary.csv`
-- `output_ablation/attribution/transition_prediction_score_gap_summary.csv`
-- `output_ablation/attribution/transition_gap.csv`
-- `output_ablation/attribution/transition_summary.png`
+`model_events.csv` 由 `5-Validation/script/mechanism_validation.py` 生成。
+读取者 `3-Intent/script/intent_tsne.py` 读取该文件，用于生成
+`3-Intent/output/Part3/` 的 t-SNE 结果。
 
-### `script/intent_pattern_analysis.py`
+大型 state-event 和 transition-event 工作表只在内存中计算，不写入 CSV。
 
-Runs intent-pattern analysis on the full PC-SAR export.
+### 最终图
 
-#### Input
+- `output_mechanism/state_validation/state_validation_uncertainty.png`
+- `output_mechanism/attribution_validation/transition_gate_validation.png`
 
-- `pcsar_intent_features_test_full.csv`
+## Script 2: Component Ablation
 
-#### What it does
+### 目的
 
-- treats `history_src_share` as the exploration proxy
-- summarizes how exploration relates to intent posterior variation
-- measures stable run length and semantic dispersion
-- summarizes how JS-based intent shift varies across transition types
+`script/ablation_analysis.py` 比较三个模型版本：
 
-#### Outputs
+```text
+full vs no_intent_state
+full vs no_counterfactual
+```
 
-- `output/1/exploration_intent_ambiguity.csv`
-- `output/1/exploration_intent_ambiguity.png`
-- `output/23/stable_runs.csv`
-- `output/23/run_length_intent_consolidation_dispersion.csv`
-- `output/23/run_length_intent_consolidation_dispersion.png`
-- `output/5/intent_future_consistency_and_expansion.csv`
-- `output/5/intent_future_consistency_and_expansion_curve.csv`
-- `output/5/intent_future_consistency_and_expansion.png`
-- `output/4/transition_type_intent_shift.csv`
-- `output/4/transition_type_intent_shift.png`
+当前三个版本分别来自：
 
-The transition figure contains two panels:
+- `Old_features/pcsar_intent_features_test_full.csv`
+- `Old_features/pcsar_intent_features_test_no_intent_state.csv`
+- `Old_features/pcsar_intent_features_test_no_counterfactual.csv`
 
-- consecutive global intent posterior JS distance
-- rec vs src intent posterior JS distance
+- state 分析只比较 `full` 与 `no_intent_state`。
+- attribution 分析只比较 `full` 与 `no_counterfactual`。
 
-## Recommended Run Order
+脚本还读取 `Data/Step4/rec_all.pkl` 和 `Data/Step4/src_all.pkl`，用于构造完整
+历史中的 nearest semantic anchors。这些 PKL 来自 Qilin 数据预处理流程，不是
+`RelSAR/test.py` 的模型导出。
 
-Run the scripts from `Analysis/` with your Python 3.11 environment:
+### 计算流程
+
+```text
+three aligned model exports + Data/Step4 histories
+  -> 对齐 user_id + sample_index
+  -> 在 full 数据上确定共同 state / transition events
+  -> 在对应模型版本上重新评估相同事件
+  -> component difference summaries
+  -> output_ablation/
+```
+
+使用共同事件定义可以避免不同模型版本因样本选择不同而产生不可比结果。
+
+### 输出 CSV 及其来源
+
+| 输出 CSV | 来源与用途 |
+| --- | --- |
+| `output_ablation/state_summary.csv` | 同一批 state-shock events 在 `full` 与 `no_intent_state` 下的聚合比较 |
+| `output_ablation/transition_summary.csv` | 同一批 anchor transitions 在 `full` 与 `no_counterfactual` 下按 transition type 聚合 |
+| `output_ablation/transition_prediction_score_gap_summary.csv` | 从 transition evaluation 汇总 relevant-source 与 irrelevant-source prediction score，并计算两者的绝对 gap |
+| `output_ablation/transition_gap.csv` | 从 transition evaluation 比较方向性差异，例如 `R->S` 与 `S->R` 的 gap |
+
+事件级明细只在内存中使用，不写入 CSV。
+
+### 最终图
+
+- `output_ablation/state_attribution_summary.png`
+
+该图同时展示 intent-state component 与 attribution component 的消融结果。
+
+## 两个脚本的关系
+
+两个脚本彼此独立：
+
+- `mechanism_validation.py` 回答完整模型内部机制是否合理。
+- `ablation_analysis.py` 回答移除 component 后结果是否发生预期变化。
+
+它们可以单独运行，没有强制先后顺序。本目录输出的唯一跨目录下游读取关系是：
+
+```text
+output_mechanism/event_level/model_events.csv
+  -> 3-Intent/script/intent_tsne.py
+```
+
+因此，若要重新生成 `3-Intent/output/Part3/`，需要先运行 mechanism validation。
+
+## 运行方式
+
+从 `Analysis/` 根目录运行，使用 Python 3.11：
 
 ```bash
 cd "/Users/Brodie/Documents/Code-RelSAR/Results&Analysis/Analysis"
-/Users/Brodie/miniconda3/bin/python3 3-PC-SAR-Validation/script/intent_pattern_analysis.py
-/Users/Brodie/miniconda3/bin/python3 3-PC-SAR-Validation/script/ablation_analysis.py
 ```
 
-If you want to regenerate the CSV exports first, run `RelSAR/test.py` with the appropriate checkpoint and split. The analysis scripts in this folder already point at the CSV exports stored in `3-PC-SAR-Validation/`.
+完整模型机制验证：
 
-## High-Level Interpretation
+```bash
+/Users/Brodie/miniconda3/bin/python3 5-Validation/script/mechanism_validation.py
+```
 
-This folder answers questions like:
+component 消融验证：
 
-- Does PC-SAR become less stable when intent-state machinery is removed?
-- Does counterfactual attribution affect transition behavior?
-- How does latent intent shift differ between search and recommendation events?
-- Which event sequences look more exploratory or more consolidated?
+```bash
+/Users/Brodie/miniconda3/bin/python3 5-Validation/script/ablation_analysis.py
+```
 
-## Summary
+两个脚本均支持命令行参数覆盖默认输入和输出路径：
 
-- `RelSAR/` produces the exported PC-SAR feature tables.
-- `3-PC-SAR-Validation/` analyzes those exports.
-- The results are used to interpret PC-SAR behavior and compare ablated variants against the full model.
+```bash
+/Users/Brodie/miniconda3/bin/python3 5-Validation/script/mechanism_validation.py --help
+/Users/Brodie/miniconda3/bin/python3 5-Validation/script/ablation_analysis.py --help
+```
+
+## 输出保留原则
+
+- 保留最终 PNG。
+- 保留解释最终图和下游分析所需的小型 summary CSV。
+- 不保存可重复生成的大型 event-level working CSV，唯一例外是下游 t-SNE 依赖的
+  `model_events.csv`。

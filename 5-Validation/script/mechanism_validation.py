@@ -17,9 +17,9 @@ DEFAULT_INPUT = SCRIPT_DIR.parent / "Features" / "intermediate" / "pcsar_intent_
 DEFAULT_OUTPUT_DIR = SCRIPT_DIR.parent / "output_mechanism"
 STATE_LABELS = ["Low", "Medium", "High"]
 STATE_COLORS = {
-    "Low": "#2f6f4e",
-    "Medium": "#c7862f",
-    "High": "#a33a2f",
+    "Low": "#6baed6",
+    "Medium": "#fdae6b",
+    "High": "#f16913",
 }
 TRANSITION_ORDER = ["R->R", "R->S", "S->R", "S->S"]
 TRANSITION_COLORS = {
@@ -867,7 +867,7 @@ def plot_uncertainty_summary(summary: pd.DataFrame, out_path: Path) -> None:
         ax.set_xticks(x, plot_df["state"].tolist())
         ax.set_title(title)
         ax.set_ylabel(title)
-        ax.set_xlabel("Explorative Transition State")
+        ax.set_xlabel("Explorative Construction State")
         ax.grid(axis="y", alpha=0.25)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -899,8 +899,8 @@ def plot_transition_summary(summary: pd.DataFrame, intent_dominance_summary: pd.
         ax.bar(xpos, means, width=width, color=color, alpha=0.88, label=label)
         ax.errorbar(xpos, means, yerr=1.96 * sems, fmt="none", ecolor="#333333", capsize=4)
     ax.set_xticks(x, bins)
-    ax.set_title("Cross-channel Attribution Gate")
-    ax.set_ylabel("Cross-channel Attribution Gate")
+    ax.set_title("Cross-channel Source Attribution Gate")
+    ax.set_ylabel("Cross-channel Source Attribution Gate")
     ax.set_xlabel("Cross-Channel Intent Dominance")
     ax.grid(axis="y", alpha=0.25)
     ax.spines["top"].set_visible(False)
@@ -947,7 +947,6 @@ def main() -> None:
     summary = pd.concat(all_summaries, ignore_index=True)
     high_low = summarize_high_low(summary)
 
-    enriched.to_csv(state_dir / "state_validation_events.csv", index=False)
     summary.to_csv(state_dir / "state_validation_summary.csv", index=False)
     high_low.to_csv(state_dir / "state_validation_high_low_differences.csv", index=False)
     plot_uncertainty_summary(summary, state_dir / "state_validation_uncertainty.png")
@@ -963,15 +962,8 @@ def main() -> None:
     gate_binned_dominance_summary = summarize_dominance_by_gate_bin(transition_events)
     intent_match_summary = summarize_cross_intent_match(transition_events)
     intent_match_target_summary = summarize_cross_intent_match_by_target(transition_events)
-    transition_events.to_csv(attribution_dir / "transition_events.csv", index=False)
     transition_summary.to_csv(attribution_dir / "transition_summary.csv", index=False)
-    transition_cross_same.to_csv(attribution_dir / "transition_cross_same_summary.csv", index=False)
-    alignment_summary.to_csv(attribution_dir / "attribution_alignment_summary.csv", index=False)
-    intent_dominance_summary.to_csv(attribution_dir / "attribution_intent_dominance_summary.csv", index=False)
     intent_dominance_target_summary.to_csv(attribution_dir / "attribution_intent_dominance_by_target_summary.csv", index=False)
-    gate_binned_dominance_summary.to_csv(attribution_dir / "attribution_gate_binned_dominance_by_target_summary.csv", index=False)
-    intent_match_summary.to_csv(attribution_dir / "attribution_intent_match_summary.csv", index=False)
-    intent_match_target_summary.to_csv(attribution_dir / "attribution_intent_match_by_target_summary.csv", index=False)
     plot_transition_summary(
         transition_summary,
         intent_dominance_target_summary,

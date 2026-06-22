@@ -1,44 +1,48 @@
-# OS and editor noise
+# Ignore CSV data files globally.
+*.csv
+*.pkl
+*.txt
+
+# Processed and source datasets are local-only.
+/Data/
+
+# Operating-system metadata.
 .DS_Store
-**/.DS_Store
-.vscode/
-**/.vscode/
-.idea/
-**/.idea/
+Thumbs.db
 
-# Python bytecode and caches
+# Python bytecode and tool caches.
 __pycache__/
-**/__pycache__/
 *.py[cod]
-*.pyd
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
 
-# Virtual environments
+# Generated analysis caches and reusable intermediates.
+.cache/
+cache/
+intermediate/
+
+# Local environments and secrets.
+.env
+.env.*
+!.env.example
 .venv/
 venv/
 env/
-.conda/
+ENV/
+conda-env/
 
-# Data and generated artifacts
-Data/
-**/output/
-**/output_ablation/
-**/intermediate/
-**/cache/
-**/New_results/
-**/figures/
+# Editor-local settings.
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 
-# Data files
-*.pkl
-*.csv
-*.tsv
-*.npy
-*.npz
-*.parquet
-*.feather
-*.joblib
-*.h5
-*.hdf5
-*.bin
-*.pt
-*.pth
-
+# Keep generated PNG figures trackable throughout the repository.
+!*.png

@@ -21,7 +21,7 @@ DEFAULT_INPUT = (
     / "event_level"
     / "model_events.csv"
 )
-DEFAULT_OUTPUT_DIR = SCRIPT_DIR.parent / "output" / "t-SNE"
+DEFAULT_OUTPUT_DIR = SCRIPT_DIR.parent / "output" / "Part3"
 STATE_LABELS = ["Low", "Medium", "High"]
 CHANNEL_MARKERS = {"R": "o", "S": "^"}
 

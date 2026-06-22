@@ -14,8 +14,8 @@ import matplotlib.pyplot as plt
 
 VARIANT_LABELS = {
     "full": "Full",
-    "no_intent_state": "w/o transition state",
-    "no_counterfactual": "w/o attribution",
+    "no_intent_state": "w/o construction state",
+    "no_counterfactual": "w/o construction source",
 }
 VARIANT_COLORS = {
     "full": "#1f77b4",
@@ -38,6 +38,26 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT_ROOT = SCRIPT_DIR.parent
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR.parent / "output_ablation"
 DEFAULT_STEP4_ROOT = SCRIPT_DIR.parent.parent / "Data" / "Step4"
+REQUIRED_ABLATION_COLUMNS = {
+    "sample_index",
+    "user_id",
+    "timestamp",
+    "channel",
+    "item_id",
+    "search_session_id",
+    "history_src_share",
+    "global_intent_entropy",
+    "global_posterior_uncertainty",
+    "rec_src_intent_shift_js",
+    "attribution_source_proxy",
+    "rec_pred_pos_score",
+    "src_pred_pos_score",
+}
+REQUIRED_ABLATION_PREFIXES = (
+    "pos_item_emb_",
+    "rec_history_mean_emb_",
+    "shared_user_feat_",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,6 +121,18 @@ def resolve_variant(path: Path) -> str | None:
     return None
 
 
+def supports_ablation_schema(path: Path) -> bool:
+    columns = set(pd.read_csv(path, nrows=0).columns)
+    if not REQUIRED_ABLATION_COLUMNS.issubset(columns):
+        return False
+    if not all(any(col.startswith(prefix) for col in columns) for prefix in REQUIRED_ABLATION_PREFIXES):
+        return False
+    return any(
+        col.startswith("rec_topk_mean_emb_") or col.startswith("rec_user_feat_")
+        for col in columns
+    )
+
+
 def discover_variant_files(root: Path) -> dict[str, Path]:
     variant_files: dict[str, Path] = {}
     patterns = [
@@ -112,7 +144,11 @@ def discover_variant_files(root: Path) -> dict[str, Path]:
         paths = sorted(root.glob(pattern))
         for path in paths:
             variant = resolve_variant(path)
-            if variant is not None and variant not in variant_files:
+            if (
+                variant is not None
+                and variant not in variant_files
+                and supports_ablation_schema(path)
+            ):
                 variant_files[variant] = path
     return variant_files
 
@@ -861,7 +897,6 @@ def main() -> None:
     for variant in STATE_VARIANTS:
         state_tables.append(evaluate_state_events(state_events, frames[variant], variant))
     state_df = pd.concat(state_tables, ignore_index=True)
-    save_table(state_df, output_root / "state" / "state_shock_events.csv")
     state_summary = summarize(
         state_df,
         ["variant"],
@@ -872,27 +907,29 @@ def main() -> None:
             "preference_margin",
         ],
     )
-    save_table(state_summary, output_root / "state" / "state_summary.csv")
+    save_table(state_summary, output_root / "state_summary.csv")
 
     transition_tables = []
     for variant in ATTR_VARIANTS:
         transition_tables.append(evaluate_transition_events(transition_events, frames[variant], variant))
     transition_df = pd.concat(transition_tables, ignore_index=True)
     transition_df["transition_type_plot"] = transition_df["transition_type"]
-    save_table(transition_df, output_root / "attribution" / "transition_events.csv")
     transition_group_col = "transition_type_plot" if "transition_type_plot" in transition_df.columns else "transition_type"
     transition_summary = summarize(transition_df, ["variant", transition_group_col], TRANSITION_METRICS)
     transition_summary = transition_summary.rename(columns={transition_group_col: "transition_type"})
-    save_table(transition_summary, output_root / "attribution" / "transition_summary.csv")
+    save_table(transition_summary, output_root / "transition_summary.csv")
     transition_prediction_score_gap_summary = summarize_prediction_score_gap(transition_df)
     save_table(
         transition_prediction_score_gap_summary,
-        output_root / "attribution" / "transition_prediction_score_gap_summary.csv",
+        output_root / "transition_prediction_score_gap_summary.csv",
     )
     transition_gap = build_transition_gap(transition_df, transition_col=transition_group_col)
-    save_table(transition_gap, output_root / "attribution" / "transition_gap.csv")
-    plot_state_summary(state_df, output_root / "state" / "state_shock_summary.png", transition_df=transition_df)
-    plot_transition_summary(transition_df, output_root / "attribution" / "transition_summary.png")
+    save_table(transition_gap, output_root / "transition_gap.csv")
+    plot_state_summary(
+        state_df,
+        output_root / "state_attribution_summary.png",
+        transition_df=transition_df,
+    )
 
     print(f"Saved ablation analysis under: {output_root.resolve()}")
 

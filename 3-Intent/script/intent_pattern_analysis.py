@@ -891,9 +891,9 @@ def main() -> None:
     raw = pd.read_csv(input_path, low_memory=False)
     df = prepare_frame(raw, args.exploration_column, args.user_key)
 
-    fig1_dir = output_root / "1"
+    part1_dir = output_root / "Part1"
     fig1 = decile_summary(df, "exploration_score")
-    save_table(fig1, fig1_dir / "exploration_intent_ambiguity.csv")
+    save_table(fig1, part1_dir / "exploration_intent_ambiguity.csv")
     plot_multi_series(
         fig1,
         "decile",
@@ -906,7 +906,7 @@ def main() -> None:
                 SERIES_COLORS[1],
             ),
         ],
-        fig1_dir / "exploration_intent_ambiguity.png",
+        part1_dir / "exploration_intent_ambiguity.png",
         "Exploration Score Decile",
         "Mean value",
         None,
@@ -914,15 +914,15 @@ def main() -> None:
 
     user_summary = build_user_summary(df, args.user_key)
 
-    fig23_dir = output_root / "23"
+    auxiliary_part2_dir = output_root / "AuxiliaryAnalysis" / "Part2"
     run_summary = build_stable_runs(df, args.user_key, args.run_jsd_threshold)
-    save_table(run_summary, fig23_dir / "stable_runs.csv")
+    save_table(run_summary, auxiliary_part2_dir / "stable_runs.csv")
     fig23 = aggregate_user_metrics(
         run_summary,
         "run_length_cap",
         ["mean_intent_entropy", "mean_uncertainty", "posterior_dispersion"],
     )
-    save_table(fig23, fig23_dir / "run_length_intent_consolidation_dispersion.csv")
+    save_table(fig23, auxiliary_part2_dir / "run_length_intent_consolidation_dispersion.csv")
     plot_stacked_lines(
         fig23,
         "run_length_cap",
@@ -931,23 +931,23 @@ def main() -> None:
             ("mean_uncertainty_mean", "mean_uncertainty_sem", "Uncertainty", SERIES_COLORS[1]),
             ("posterior_dispersion_mean", "posterior_dispersion_sem", "Posterior dispersion", SERIES_COLORS[2]),
         ],
-        fig23_dir / "run_length_intent_consolidation_dispersion.png",
+        auxiliary_part2_dir / "run_length_intent_consolidation_dispersion.png",
         "Semantic neighbor run length",
         None,
     )
 
-    fig5_dir = output_root / "5"
+    auxiliary_part1_dir = output_root / "AuxiliaryAnalysis" / "Part1"
     intent_future_raw = build_intent_future_scores(df, args.user_key)
-    save_table(intent_future_raw, fig5_dir / "intent_future_consistency_and_expansion.csv")
+    save_table(intent_future_raw, auxiliary_part1_dir / "intent_future_consistency_and_expansion.csv")
     intent_future_summary = summarize_intent_future_curves(intent_future_raw)
-    save_table(intent_future_summary, fig5_dir / "intent_future_consistency_and_expansion_curve.csv")
+    save_table(intent_future_summary, auxiliary_part1_dir / "intent_future_consistency_and_expansion_curve.csv")
     plot_intent_future_curves(
         intent_future_raw,
         intent_future_summary,
-        fig5_dir / "intent_future_consistency_and_expansion.png",
+        auxiliary_part1_dir / "intent_future_consistency_and_expansion.png",
     )
 
-    fig4_dir = output_root / "4"
+    part2_dir = output_root / "Part2"
     transition_summary = build_transition_summary(df, args.user_key)
     transition_score_summary = aggregate_transition_score_lines(
         transition_summary,
@@ -955,11 +955,11 @@ def main() -> None:
         ["consecutive_intent_shift"],
         n_bins=TRANSITION_SCORE_BINS,
     )
-    save_table(transition_score_summary, fig4_dir / "transition_type_intent_shift.csv")
+    save_table(transition_score_summary, part2_dir / "transition_type_intent_shift.csv")
     plot_transition_score_lines(
         transition_summary,
         transition_score_summary,
-        fig4_dir / "transition_type_intent_shift.png",
+        part2_dir / "transition_type_intent_shift.png",
     )
 
     print(f"Saved analysis tables and figures under: {output_root.resolve()}")
