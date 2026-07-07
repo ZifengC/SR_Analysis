@@ -856,8 +856,8 @@ def plot_uncertainty_summary(summary: pd.DataFrame, out_path: Path) -> None:
 
     fig, axes = plt.subplots(1, 2, figsize=(10.6, 4.6), constrained_layout=True)
     panels = [
-        ("future_consistency_mean", "future_consistency_sem", "Intent Future Consistency"),
-        ("future_intent_dispersion_mean", "future_intent_dispersion_sem", "Intent Future Expansion"),
+        ("future_consistency_mean", "future_consistency_sem", "Future Intent Persistence"),
+        ("future_intent_dispersion_mean", "future_intent_dispersion_sem", "Future Intent Breadth"),
     ]
     for ax, (mean_col, sem_col, title) in zip(axes, panels):
         means = plot_df[mean_col].to_numpy(dtype=float)
@@ -867,7 +867,7 @@ def plot_uncertainty_summary(summary: pd.DataFrame, out_path: Path) -> None:
         ax.set_xticks(x, plot_df["state"].tolist())
         ax.set_title(title)
         ax.set_ylabel(title)
-        ax.set_xlabel("Explorative Construction State")
+        ax.set_xlabel("Degree of Preference Elaboration")
         ax.grid(axis="y", alpha=0.25)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -899,9 +899,8 @@ def plot_transition_summary(summary: pd.DataFrame, intent_dominance_summary: pd.
         ax.bar(xpos, means, width=width, color=color, alpha=0.88, label=label)
         ax.errorbar(xpos, means, yerr=1.96 * sems, fmt="none", ecolor="#333333", capsize=4)
     ax.set_xticks(x, bins)
-    ax.set_title("Cross-channel Source Attribution Gate")
-    ax.set_ylabel("Cross-channel Source Attribution Gate")
-    ax.set_xlabel("Cross-Channel Intent Dominance")
+    ax.set_ylabel("Estimated Context Weight")
+    ax.set_xlabel("Degree of Cross-Channel Intent Dominance")
     ax.grid(axis="y", alpha=0.25)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)

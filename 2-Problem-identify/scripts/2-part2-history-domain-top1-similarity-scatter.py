@@ -186,7 +186,7 @@ def plot_domain_topk_scatter(scatter_df):
                 linewidth=2.4,
                 alpha=0.95,
             )
-            fit_note = f'fit: S_s = {slope:.2f} S_r + {intercept:.2f}'
+            fit_note = f'y = {slope:.2f}x + {intercept:.2f}'
 
         ax.axline((0, 0), slope=1, color='#202020', linestyle='--', linewidth=1.1, alpha=0.55)
         ax.axvline(0, color='#202020', linewidth=0.9, alpha=0.35)
@@ -195,7 +195,7 @@ def plot_domain_topk_scatter(scatter_df):
         ax.set_ylim(-0.05, axis_max)
         ax.set_aspect('equal', adjustable='box')
         ax.grid(alpha=0.22)
-        ax.set_xlabel(f'S_r: top-{TOP_K} similarity to recommendation history')
+        ax.set_xlabel(f'Top-{TOP_K} similarity to recommendation history')
         ax.set_title(DOMAIN_LABELS[domain], fontsize=13)
 
         note = f'n = {len(full_sub):,}'
@@ -212,7 +212,7 @@ def plot_domain_topk_scatter(scatter_df):
             bbox=dict(boxstyle='round,pad=0.35', facecolor='white', alpha=0.86, edgecolor='none'),
         )
 
-    axes[0].set_ylabel(f'S_s: top-{TOP_K} similarity to search history')
+    axes[0].set_ylabel(f'Top-{TOP_K} similarity to search history')
     fig.tight_layout()
     fig.savefig(FIG_DIR / 'fig5_history_domain_top1_similarity_scatter.png', dpi=220, bbox_inches='tight')
     plt.close(fig)

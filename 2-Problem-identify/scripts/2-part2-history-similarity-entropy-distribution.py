@@ -167,9 +167,9 @@ def plot_topk_mass_distribution(topk_df, summary):
         ax.axvline(med, color='#202020', linewidth=2.0, label=f'Median {med:.3f}')
         ax.axvline(mean, color='#202020', linestyle='--', linewidth=1.6, alpha=0.78, label=f'Mean {mean:.3f}')
         ax.text(
-            0.97,
-            0.94,
-            f'n = {len(sub):,}\nmean = {mean:.3f}\nmedian = {med:.3f}',
+            0.98,
+            0.82,
+            f'n = {len(sub):,}',
             transform=ax.transAxes,
             va='top',
             ha='right',
@@ -180,7 +180,7 @@ def plot_topk_mass_distribution(topk_df, summary):
         ax.set_xlabel('Top-5 mass of current-to-history similarities')
         ax.set_xlim(x_low, x_high)
         ax.grid(axis='y', alpha=0.22)
-        ax.legend(frameon=False, loc='upper right', bbox_to_anchor=(0.98, 0.74))
+        ax.legend(frameon=False, loc='upper right', bbox_to_anchor=(0.98, 0.70))
 
     axes[0].set_ylabel('Density')
     fig.subplots_adjust(left=0.07, right=0.98, bottom=0.16, top=0.88, wspace=0.18)
