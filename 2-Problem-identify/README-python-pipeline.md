@@ -8,6 +8,9 @@ Recommended command sequence:
 cd "/Users/Brodie/Documents/Code-RelSAR/Results&Analysis/Analysis"
 /Users/Brodie/miniconda3/bin/python3 2-Problem-identify/scripts/1-part1-exploration.py
 /Users/Brodie/miniconda3/bin/python3 2-Problem-identify/scripts/2-part2-transition-level.py
+/Users/Brodie/miniconda3/bin/python3 2-Problem-identify/scripts/2-part2-history-similarity-entropy-distribution.py
+/Users/Brodie/miniconda3/bin/python3 2-Problem-identify/scripts/2-part2-history-domain-top1-similarity-scatter.py
+/Users/Brodie/miniconda3/bin/python3 2-Problem-identify/scripts/2-part2-history-domain-top1-delta-distribution.py
 /Users/Brodie/miniconda3/bin/python3 2-Problem-identify/scripts/2-part2-transition-exploration-curves.py
 /Users/Brodie/miniconda3/bin/python3 2-Problem-identify/scripts/2-part2-consolidation-quadrant.py
 /Users/Brodie/miniconda3/bin/python3 2-Problem-identify/scripts/2-part2-consolidation-transition-colors.py
