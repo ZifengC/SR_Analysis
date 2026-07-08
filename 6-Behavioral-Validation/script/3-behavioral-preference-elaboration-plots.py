@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import pickle
+import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -27,6 +28,20 @@ CHANNEL_COLORS = {"R": "#3B6EA8", "S": "#C45A2A"}
 STATE_LABELS = ["Low", "Medium", "High"]
 STATE_COLORS = {"Low": "#4C78A8", "Medium": "#8A8A8A", "High": "#D65F2E"}
 PLOTTED_STATES = ["Low", "High"]
+CHANGE_TYPE_ORDER = ["substitution", "specification", "generalization"]
+CHANGE_TYPE_LABELS = {
+    "substitution": "Substitution",
+    "specification": "Specification",
+    "generalization": "Generalization",
+}
+CHANGE_TYPE_COLORS = {
+    "substitution": "#D65F2E",
+    "specification": "#4C78A8",
+    "generalization": "#59A14F",
+}
+
+
+TOKEN_RE = re.compile(r"[\w]+", flags=re.UNICODE)
 
 
 def ensure_dirs() -> None:
@@ -69,6 +84,9 @@ def load_model() -> pd.DataFrame:
         "global_intent_entropy",
         "global_belief_entropy_mean",
         "global_belief_confidence_mean",
+        "src_pred_pos_score",
+        "rec_history_length",
+        "src_history_length",
     ]
     df = pd.read_csv(MODEL_PATH, usecols=cols)
     for col in [
@@ -80,6 +98,9 @@ def load_model() -> pd.DataFrame:
         "global_intent_entropy",
         "global_belief_entropy_mean",
         "global_belief_confidence_mean",
+        "src_pred_pos_score",
+        "rec_history_length",
+        "src_history_length",
         "sample_index",
     ]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -114,16 +135,10 @@ def compute_future_dwell_time(df: pd.DataFrame, window: int) -> pd.Series:
                 values[i] = float(np.mean(future))
         out.loc[g.index] = values
     for _, g in search.groupby(["user_id", "channel", "search_session_id"], sort=False, dropna=False):
-        page_time = pd.to_numeric(g["page_time"], errors="coerce").to_numpy(dtype=float)
-        values = np.full(len(g), np.nan, dtype=float)
-        finite = np.isfinite(page_time)
-        total = float(np.sum(page_time[finite]))
-        count = int(np.sum(finite))
-        for i in range(len(g)):
-            item_total = total - (float(page_time[i]) if finite[i] else 0.0)
-            item_count = count - (1 if finite[i] else 0)
-            if item_count > 0:
-                values[i] = item_total / item_count
+        ts = pd.to_numeric(g["timestamp"], errors="coerce").to_numpy(dtype=float)
+        finite = np.isfinite(ts)
+        session_span = float(np.max(ts[finite]) - np.min(ts[finite])) if np.any(finite) else np.nan
+        values = np.full(len(g), session_span, dtype=float)
         out.loc[g.index] = values
     return out
 
@@ -175,16 +190,57 @@ def load_or_encode_queries(sessions: pd.DataFrame, batch_size: int) -> np.ndarra
     return np.vstack([cache[q] for q in sessions["query"].astype(str)]).astype(np.float32)
 
 
+def query_units(query: str) -> list[str]:
+    normalized = str(query).lower().strip()
+    tokens = TOKEN_RE.findall(normalized)
+    if len(tokens) > 1:
+        return tokens
+    return [char for char in normalized if not char.isspace()]
+
+
+def lexical_query_change(query_a: str, query_b: str) -> tuple[float, float, float, float, float, str]:
+    norm_a = str(query_a).lower().strip()
+    norm_b = str(query_b).lower().strip()
+    units_a = query_units(norm_a)
+    units_b = query_units(norm_b)
+    set_a = set(units_a)
+    set_b = set(units_b)
+    union = set_a | set_b
+    jaccard = float(len(set_a & set_b) / len(union)) if union else np.nan
+    length_delta = float(len(units_b) - len(units_a))
+    added_ratio = float(len(set_b - set_a) / len(set_b)) if set_b else np.nan
+    removed_ratio = float(len(set_a - set_b) / len(set_a)) if set_a else np.nan
+
+    if norm_a == norm_b:
+        return jaccard, length_delta, added_ratio, removed_ratio, 0.0, "repeat"
+    if not np.isfinite(jaccard) or jaccard < 0.2:
+        return jaccard, length_delta, added_ratio, removed_ratio, 0.0, "new_intent"
+    if jaccard >= 0.5 and length_delta > 0:
+        return jaccard, length_delta, added_ratio, removed_ratio, 1.0, "specification"
+    if jaccard >= 0.5 and length_delta < 0:
+        return jaccard, length_delta, added_ratio, removed_ratio, 1.0, "generalization"
+    return jaccard, length_delta, added_ratio, removed_ratio, 1.0, "substitution"
+
+
 def future_query_reformulation(
     df: pd.DataFrame,
     sessions: pd.DataFrame,
     session_emb: np.ndarray,
     future_window: int,
     threshold: float,
+    max_future_seconds: float,
 ) -> pd.DataFrame:
     out = pd.DataFrame(
         {
             "future_query_reformulation": np.full(len(df), np.nan, dtype=float),
+            "next_query_reformulation": np.full(len(df), np.nan, dtype=float),
+            "next_query_similarity": np.full(len(df), np.nan, dtype=float),
+            "next_query_token_jaccard": np.full(len(df), np.nan, dtype=float),
+            "next_query_length_delta": np.full(len(df), np.nan, dtype=float),
+            "next_query_added_token_ratio": np.full(len(df), np.nan, dtype=float),
+            "next_query_removed_token_ratio": np.full(len(df), np.nan, dtype=float),
+            "next_query_lexical_reformulation": np.full(len(df), np.nan, dtype=float),
+            "next_query_change_type": pd.Series(pd.NA, index=df.index, dtype="object"),
             "future_query_reformulation_length": np.full(len(df), np.nan, dtype=float),
             "future_query_max_adjacent_similarity": np.full(len(df), np.nan, dtype=float),
             "future_query_pairs_observed": np.zeros(len(df), dtype=np.int16),
@@ -206,32 +262,10 @@ def future_query_reformulation(
             continue
 
         q_ts = qs["timestamp"].to_numpy(dtype=float)
+        q_text = qs["query"].astype(str).to_numpy()
         emb = session_emb[qs["_emb_row"].to_numpy(dtype=int)]
         pair_sim = np.sum(emb[:-1] * emb[1:], axis=1)
-
         n = len(qs)
-        start_flags = np.full(n + 1, np.nan, dtype=float)
-        start_lengths = np.full(n + 1, np.nan, dtype=float)
-        start_max = np.full(n + 1, np.nan, dtype=float)
-        start_pairs = np.zeros(n + 1, dtype=np.int16)
-        for start in range(n):
-            max_pair_end = min(n - 1, start + future_window - 1)
-            if max_pair_end <= start:
-                continue
-            sims = pair_sim[start:max_pair_end]
-            sims = sims[np.isfinite(sims)]
-            if len(sims) == 0:
-                continue
-            start_pairs[start] = len(sims)
-            start_max[start] = float(np.max(sims))
-            start_flags[start] = float(np.max(sims) >= threshold)
-            is_reformulation = sims >= threshold
-            run_len = 0
-            for value in is_reformulation:
-                if not value:
-                    break
-                run_len += 1
-            start_lengths[start] = float(run_len)
 
         event_ts = events["timestamp"].to_numpy(dtype=float)
         starts = np.searchsorted(q_ts, event_ts, side="right")
@@ -239,10 +273,50 @@ def future_query_reformulation(
         if not np.any(valid):
             continue
         idx = events.index.to_numpy()
-        out.loc[idx[valid], "future_query_reformulation"] = start_flags[starts[valid]]
-        out.loc[idx[valid], "future_query_reformulation_length"] = start_lengths[starts[valid]]
-        out.loc[idx[valid], "future_query_max_adjacent_similarity"] = start_max[starts[valid]]
-        out.loc[idx[valid], "future_query_pairs_observed"] = start_pairs[starts[valid]]
+        valid_positions = np.flatnonzero(valid)
+        for local_i in valid_positions:
+            start = int(starts[local_i])
+            max_query_end = min(n, start + future_window)
+            if max_future_seconds and max_future_seconds > 0:
+                time_end = int(np.searchsorted(q_ts, event_ts[local_i] + max_future_seconds, side="right"))
+            else:
+                time_end = n
+            query_end = min(max_query_end, time_end)
+            if query_end - start < 2:
+                continue
+
+            sims = pair_sim[start : query_end - 1]
+            sims = sims[np.isfinite(sims)]
+            if len(sims) == 0:
+                continue
+
+            row_idx = idx[local_i]
+            out.loc[row_idx, "future_query_pairs_observed"] = len(sims)
+            out.loc[row_idx, "next_query_similarity"] = float(sims[0])
+            out.loc[row_idx, "next_query_reformulation"] = float(sims[0] >= threshold)
+            (
+                jaccard,
+                length_delta,
+                added_ratio,
+                removed_ratio,
+                lexical_reformulation,
+                change_type,
+            ) = lexical_query_change(q_text[start], q_text[start + 1])
+            out.loc[row_idx, "next_query_token_jaccard"] = jaccard
+            out.loc[row_idx, "next_query_length_delta"] = length_delta
+            out.loc[row_idx, "next_query_added_token_ratio"] = added_ratio
+            out.loc[row_idx, "next_query_removed_token_ratio"] = removed_ratio
+            out.loc[row_idx, "next_query_lexical_reformulation"] = lexical_reformulation
+            out.loc[row_idx, "next_query_change_type"] = change_type
+            out.loc[row_idx, "future_query_max_adjacent_similarity"] = float(np.max(sims))
+            out.loc[row_idx, "future_query_reformulation"] = float(np.max(sims) >= threshold)
+            is_reformulation = sims >= threshold
+            run_len = 0
+            for value in is_reformulation:
+                if not value:
+                    break
+                run_len += 1
+            out.loc[row_idx, "future_query_reformulation_length"] = float(run_len)
 
     return out
 
@@ -312,6 +386,7 @@ def build_metrics(args: argparse.Namespace) -> pd.DataFrame:
         session_emb,
         future_window=args.query_window,
         threshold=args.reformulation_threshold,
+        max_future_seconds=args.query_time_window_minutes * 60,
     )
     query_click_counts = future_query_click_count_average(
         behavior,
@@ -351,6 +426,9 @@ def build_metrics(args: argparse.Namespace) -> pd.DataFrame:
                 "global_intent_entropy",
                 "global_belief_entropy_mean",
                 "global_belief_confidence_mean",
+                "src_pred_pos_score",
+                "rec_history_length",
+                "src_history_length",
             ]
         ],
         on=KEY + ["_key_occ"],
@@ -371,6 +449,15 @@ def build_metrics(args: argparse.Namespace) -> pd.DataFrame:
     aligned["belief_confidence_dwell_state"] = assign_preference_elaboration_state(
         aligned["global_belief_confidence_mean"]
     )
+    aligned["search_duration_state_metric"] = -aligned["src_pred_pos_score"]
+    aligned["channel_specific_dwell_state"] = pd.NA
+    s_state = assign_preference_elaboration_state(
+        aligned.loc[aligned["channel"] == "S", "search_duration_state_metric"]
+    )
+    aligned.loc[aligned["channel"] == "R", "channel_specific_dwell_state"] = aligned.loc[
+        aligned["channel"] == "R", "belief_confidence_dwell_state"
+    ]
+    aligned.loc[s_state.index, "channel_specific_dwell_state"] = s_state
     aligned = aligned.drop(columns=["_channel_order", "_row_id", "_key_occ"])
     print(f"Aligned behavior-model rows: {len(aligned):,}")
     print(
@@ -409,6 +496,8 @@ def plot_state_histograms(
     state_col: str = "preference_elaboration_state",
     channels: list[str] | None = None,
     row_filter=None,
+    xlim: tuple[float, float] | None = None,
+    raw_label: str | None = None,
 ) -> None:
     if channels is None:
         channels = ["R", "S"]
@@ -443,14 +532,8 @@ def plot_state_histograms(
     for panel_i, (row_i, state, channel) in enumerate(panels):
             col_i = panel_i if channels == ["S"] else channels.index(channel)
             ax = axes[row_i, col_i]
-            vals = pd.to_numeric(
-                plot_df.loc[
-                    (plot_df["channel"] == channel)
-                    & (plot_df[state_col] == state),
-                    y_col,
-                ],
-                errors="coerce",
-            ).dropna()
+            panel_mask = (plot_df["channel"] == channel) & (plot_df[state_col] == state)
+            vals = pd.to_numeric(plot_df.loc[panel_mask, y_col], errors="coerce").dropna()
             if vals.empty:
                 ax.set_title(f"{state} - {'Recommendation' if channel == 'R' else 'Search'}")
                 ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
@@ -464,7 +547,40 @@ def plot_state_histograms(
                 color=STATE_COLORS[state],
                 label=f"n={len(vals):,}",
             )
-            ax.axvline(vals.mean(), color="#111111", linewidth=2.0, label=f"mean={vals.mean():.2f}")
+            if raw_label is not None:
+                raw_vals = pd.to_numeric(
+                    df.loc[
+                        (df["channel"] == channel)
+                        & (df[state_col] == state),
+                        y_col,
+                    ],
+                    errors="coerce",
+                )
+                if value_filter is not None:
+                    raw_keep = value_filter(raw_vals.to_numpy(dtype=float))
+                    raw_vals = raw_vals[raw_keep]
+                raw_vals = raw_vals.replace([np.inf, -np.inf], np.nan).dropna()
+                mean_label = f"mean={raw_vals.mean():.1f}{raw_label}"
+                median_label = f"median={raw_vals.median():.1f}{raw_label}"
+                if transform_y is not None:
+                    mean_x = float(transform_y(np.asarray([raw_vals.mean()], dtype=float))[0])
+                    median_x = float(transform_y(np.asarray([raw_vals.median()], dtype=float))[0])
+                else:
+                    mean_x = float(raw_vals.mean())
+                    median_x = float(raw_vals.median())
+            else:
+                mean_label = f"mean={vals.mean():.2f}"
+                median_label = f"median={vals.median():.2f}"
+                mean_x = float(vals.mean())
+                median_x = float(vals.median())
+            ax.axvline(mean_x, color="#111111", linewidth=2.0, label=mean_label)
+            ax.axvline(
+                median_x,
+                color="#111111",
+                linewidth=2.0,
+                linestyle="--",
+                label=median_label,
+            )
             ax.set_title(f"{state} - {'Recommendation' if channel == 'R' else 'Search'}")
             ax.grid(axis="y", alpha=0.24)
             ax.spines["top"].set_visible(False)
@@ -474,6 +590,163 @@ def plot_state_histograms(
                 ax.set_xlabel(y_label)
             if col_i == 0:
                 ax.set_ylabel("Density")
+            if xlim is not None:
+                ax.set_xlim(*xlim)
+    fig.suptitle(title)
+    fig.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved figure: {out_path}")
+
+
+def plot_next_query_reformulation_probability(
+    df: pd.DataFrame,
+    out_path: Path,
+    threshold: float,
+    time_window_minutes: float,
+    outcome_col: str = "next_query_reformulation",
+    outcome_label: str | None = None,
+    row_filter=None,
+    filter_label: str | None = None,
+) -> None:
+    if row_filter is not None:
+        df = df[row_filter(df)].copy()
+    plot_df = df[
+        ["preference_elaboration_state", outcome_col, "channel"]
+    ].replace([np.inf, -np.inf], np.nan).dropna()
+    plot_df = plot_df[plot_df["preference_elaboration_state"].isin(STATE_LABELS)].copy()
+    plot_df = plot_df[plot_df["channel"].isin(["R", "S"])].copy()
+
+    summary = (
+        plot_df.groupby(["channel", "preference_elaboration_state"], observed=True)
+        .agg(
+            probability=(outcome_col, "mean"),
+            count=(outcome_col, "size"),
+        )
+        .reset_index()
+    )
+
+    fig, ax = plt.subplots(figsize=(8.8, 5.0), constrained_layout=True)
+    x = np.arange(len(STATE_LABELS), dtype=float)
+    width = 0.34
+    offsets = {"R": -width / 2, "S": width / 2}
+    channel_names = {"R": "Recommendation", "S": "Search"}
+
+    for channel in ["R", "S"]:
+        channel_summary = summary[summary["channel"] == channel].set_index("preference_elaboration_state")
+        probs = [channel_summary.loc[state, "probability"] if state in channel_summary.index else np.nan for state in STATE_LABELS]
+        counts = [channel_summary.loc[state, "count"] if state in channel_summary.index else 0 for state in STATE_LABELS]
+        bars = ax.bar(
+            x + offsets[channel],
+            probs,
+            width=width,
+            color=CHANNEL_COLORS[channel],
+            alpha=0.82,
+            label=channel_names[channel],
+        )
+        for bar, prob, count in zip(bars, probs, counts):
+            if not np.isfinite(prob):
+                continue
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.008,
+                f"{prob:.3f}\nn={int(count):,}",
+                ha="center",
+                va="bottom",
+                fontsize=8.5,
+            )
+
+    title = "Preference Elaboration vs Future Query Reformulation"
+    if filter_label:
+        title = f"{title}\n{filter_label}"
+    ax.set_title(title)
+    ax.set_xlabel("Preference elaboration level")
+    if outcome_label is None:
+        time_label = f"within {time_window_minutes:g} min, " if time_window_minutes and time_window_minutes > 0 else ""
+        outcome_label = f"next query reformulation {time_label}sim >= {threshold}"
+    ax.set_ylabel(f"P({outcome_label})")
+    ax.set_xticks(x)
+    ax.set_xticklabels(STATE_LABELS)
+    ax.set_ylim(0, min(1.0, max(0.1, float(summary["probability"].max()) + 0.08)))
+    ax.grid(axis="y", alpha=0.24)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(frameon=False)
+    fig.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved figure: {out_path}")
+
+
+def plot_next_query_change_type_stacked(
+    df: pd.DataFrame,
+    out_path: Path,
+    row_filter=None,
+    filter_label: str | None = None,
+) -> None:
+    if row_filter is not None:
+        df = df[row_filter(df)].copy()
+    plot_df = df[
+        ["preference_elaboration_state", "next_query_change_type", "channel"]
+    ].replace([np.inf, -np.inf], np.nan).dropna()
+    plot_df = plot_df[plot_df["preference_elaboration_state"].isin(STATE_LABELS)].copy()
+    plot_df = plot_df[plot_df["channel"].isin(["R", "S"])].copy()
+
+    counts = (
+        plot_df.groupby(
+            ["channel", "preference_elaboration_state", "next_query_change_type"],
+            observed=True,
+        )
+        .size()
+        .rename("count")
+        .reset_index()
+    )
+    totals = (
+        counts.groupby(["channel", "preference_elaboration_state"], observed=True)["count"]
+        .sum()
+        .rename("total")
+        .reset_index()
+    )
+    summary = counts.merge(totals, on=["channel", "preference_elaboration_state"], how="left")
+    summary["share"] = summary["count"] / summary["total"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.8), sharey=True, constrained_layout=True)
+    channel_names = {"R": "Recommendation", "S": "Search"}
+    x = np.arange(len(STATE_LABELS), dtype=float)
+
+    for ax, channel in zip(axes, ["R", "S"]):
+        channel_summary = summary[summary["channel"] == channel]
+        bottoms = np.zeros(len(STATE_LABELS), dtype=float)
+        for change_type in CHANGE_TYPE_ORDER:
+            typed = channel_summary[channel_summary["next_query_change_type"] == change_type]
+            shares = (
+                typed.set_index("preference_elaboration_state")["share"]
+                .reindex(STATE_LABELS)
+                .fillna(0)
+                .to_numpy(dtype=float)
+            )
+            ax.bar(
+                x,
+                shares,
+                bottom=bottoms,
+                color=CHANGE_TYPE_COLORS[change_type],
+                label=CHANGE_TYPE_LABELS[change_type],
+                width=0.62,
+                edgecolor="white",
+                linewidth=0.6,
+            )
+            bottoms += shares
+        ax.set_title(channel_names[channel])
+        ax.set_xticks(x)
+        ax.set_xticklabels(STATE_LABELS)
+        ax.set_xlabel("Preference elaboration level")
+        ax.set_ylim(0, min(1.0, max(0.1, float(bottoms.max()) * 1.18)))
+        ax.grid(axis="y", alpha=0.22)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+    axes[0].set_ylabel("Share of next query reformulation type")
+    axes[1].legend(frameon=False, bbox_to_anchor=(1.02, 1.0), loc="upper left")
+    title = "Preference Elaboration vs Future Query Reformulation"
+    if filter_label:
+        title = f"{title}\n{filter_label}"
     fig.suptitle(title)
     fig.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -482,25 +755,26 @@ def plot_state_histograms(
 
 def plot_all(metrics: pd.DataFrame, args: argparse.Namespace) -> None:
     FIG_DIR.mkdir(parents=True, exist_ok=True)
-    plot_state_histograms(
+    plot_next_query_change_type_stacked(
         metrics,
-        "future_query_reformulation_length",
-        "Preference Elaboration vs Future Query Reformulation",
-        f"Future consecutive query reformulation length (sim >= {args.reformulation_threshold})",
         FIG_DIR / "preference_elaboration_future_query_reformulation.png",
-        bins=np.arange(-0.5, args.query_window, 1.0),
-        value_filter=lambda values: values > 0,
+        row_filter=lambda data: data["rec_history_length"].between(8, 9)
+        & data["src_history_length"].between(1, 10),
+        filter_label="History controlled: 8 <= R history <= 9, 1 <= S history <= 10",
     )
     plot_state_histograms(
         metrics,
         "future_dwell_time",
         "Preference Elaboration vs Future Dwell Time",
-        f"Future dwell time, log1p(page_time): R next {args.dwell_window}; S same session excluding current",
+        f"Future time, log1p(seconds): R next {args.dwell_window} dwell; S session last-first",
         FIG_DIR / "preference_elaboration_dwell_time.png",
         transform_y=np.log1p,
         bins=45,
         value_filter=lambda values: values > 0,
-        state_col="belief_confidence_dwell_state",
+        state_col="channel_specific_dwell_state",
+        row_filter=lambda data: (data["channel"] == "R") | (data["rec_history_length"] >= 10),
+        xlim=(0, 10),
+        raw_label="s",
     )
     plot_state_histograms(
         metrics,
@@ -532,9 +806,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--query-window", type=int, default=10)
     parser.add_argument("--query-click-window", type=int, default=5)
+    parser.add_argument("--query-time-window-minutes", type=float, default=0.0)
     parser.add_argument("--position-window", type=int, default=5)
     parser.add_argument("--dwell-window", type=int, default=3)
-    parser.add_argument("--reformulation-threshold", type=float, default=0.5)
+    parser.add_argument("--reformulation-threshold", type=float, default=0.75)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--reuse-metrics", action="store_true", help="Read the cached metrics parquet if it exists.")
     return parser.parse_args()
