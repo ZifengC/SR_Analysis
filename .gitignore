@@ -2,6 +2,7 @@
 *.csv
 *.pkl
 *.txt
+*.parquet
 
 # Processed and source datasets are local-only.
 /Data/
