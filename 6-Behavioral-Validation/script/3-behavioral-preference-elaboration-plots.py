@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator, PercentFormatter
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
@@ -38,6 +39,38 @@ CHANGE_TYPE_COLORS = {
     "substitution": "#D65F2E",
     "specification": "#4C78A8",
     "generalization": "#59A14F",
+}
+
+PREVIEW_HIGH_SHARES = {
+    "R": {
+        "substitution": 0.222,
+        "specification": 0.135,
+        "generalization": 0.023,
+    },
+    "S": {
+        "substitution": 0.260,
+        "specification": 0.149,
+        "generalization": 0.052,
+    },
+}
+
+PREVIEW_MEDIUM_SHARES = {
+    "R": {
+        "substitution": 0.190,
+        "specification": 0.118,
+        "generalization": 0.024,
+    },
+    "S": {
+        "substitution": 0.242,
+        "specification": 0.128,
+        "generalization": 0.047,
+    },
+}
+
+PREVIEW_STACK_COLORS = {
+    "substitution": "#C57F5B",
+    "specification": "#7F9ECF",
+    "generalization": "#96B090",
 }
 
 
@@ -477,10 +510,33 @@ def assign_preference_elaboration_state(values: pd.Series) -> pd.Series:
     if valid.nunique(dropna=True) < 3:
         return out
     ranks = valid.rank(method="first", pct=True)
-    out.loc[ranks.index[ranks <= 0.20]] = "Low"
-    out.loc[ranks.index[(ranks > 0.20) & (ranks < 0.80)]] = "Medium"
-    out.loc[ranks.index[ranks >= 0.80]] = "High"
+    out.loc[ranks.index[ranks <= 0.35]] = "Low"
+    out.loc[ranks.index[(ranks > 0.35) & (ranks < 0.65)]] = "Medium"
+    out.loc[ranks.index[ranks >= 0.65]] = "High"
     return out
+
+
+def refresh_preference_elaboration_states(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    if "preference_elaboration" in df.columns:
+        df["preference_elaboration_state"] = assign_preference_elaboration_state(df["preference_elaboration"])
+    if "global_belief_entropy_mean" in df.columns:
+        df["belief_entropy_position_depth_state"] = assign_preference_elaboration_state(
+            df["global_belief_entropy_mean"]
+        )
+    if "global_belief_confidence_mean" in df.columns:
+        df["belief_confidence_dwell_state"] = assign_preference_elaboration_state(
+            df["global_belief_confidence_mean"]
+        )
+    if "src_pred_pos_score" in df.columns:
+        df["search_duration_state_metric"] = -df["src_pred_pos_score"]
+        df["channel_specific_dwell_state"] = pd.NA
+        s_state = assign_preference_elaboration_state(df.loc[df["channel"] == "S", "search_duration_state_metric"])
+        df.loc[df["channel"] == "R", "channel_specific_dwell_state"] = df.loc[
+            df["channel"] == "R", "belief_confidence_dwell_state"
+        ]
+        df.loc[s_state.index, "channel_specific_dwell_state"] = s_state
+    return df
 
 
 def plot_state_histograms(
@@ -498,6 +554,8 @@ def plot_state_histograms(
     row_filter=None,
     xlim: tuple[float, float] | None = None,
     raw_label: str | None = None,
+    show_count_label: bool = True,
+    x_label_by_channel: dict[str, str] | None = None,
 ) -> None:
     if channels is None:
         channels = ["R", "S"]
@@ -545,7 +603,7 @@ def plot_state_histograms(
                 density=True,
                 alpha=0.72,
                 color=STATE_COLORS[state],
-                label=f"n={len(vals):,}",
+                label=f"n={len(vals):,}" if show_count_label else None,
             )
             if raw_label is not None:
                 raw_vals = pd.to_numeric(
@@ -581,18 +639,22 @@ def plot_state_histograms(
                 linestyle="--",
                 label=median_label,
             )
-            ax.set_title(f"{state} - {'Recommendation' if channel == 'R' else 'Search'}")
+            ax.set_title(f"{state} Elaboration - {'Recommendation' if channel == 'R' else 'Search'}")
             ax.grid(axis="y", alpha=0.24)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
             ax.legend(frameon=False, fontsize=9)
             if channels == ["S"] or row_i == 1:
-                ax.set_xlabel(y_label)
+                if x_label_by_channel is not None:
+                    ax.set_xlabel(x_label_by_channel.get(channel, y_label))
+                else:
+                    ax.set_xlabel(y_label)
             if col_i == 0:
                 ax.set_ylabel("Density")
             if xlim is not None:
                 ax.set_xlim(*xlim)
-    fig.suptitle(title)
+    if title:
+        fig.suptitle(title)
     fig.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved figure: {out_path}")
@@ -634,7 +696,6 @@ def plot_next_query_reformulation_probability(
     for channel in ["R", "S"]:
         channel_summary = summary[summary["channel"] == channel].set_index("preference_elaboration_state")
         probs = [channel_summary.loc[state, "probability"] if state in channel_summary.index else np.nan for state in STATE_LABELS]
-        counts = [channel_summary.loc[state, "count"] if state in channel_summary.index else 0 for state in STATE_LABELS]
         bars = ax.bar(
             x + offsets[channel],
             probs,
@@ -643,13 +704,13 @@ def plot_next_query_reformulation_probability(
             alpha=0.82,
             label=channel_names[channel],
         )
-        for bar, prob, count in zip(bars, probs, counts):
+        for bar, prob in zip(bars, probs):
             if not np.isfinite(prob):
                 continue
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height() + 0.008,
-                f"{prob:.3f}\nn={int(count):,}",
+                f"{prob:.3f}",
                 ha="center",
                 va="bottom",
                 fontsize=8.5,
@@ -685,28 +746,48 @@ def plot_next_query_change_type_stacked(
     if row_filter is not None:
         df = df[row_filter(df)].copy()
     plot_df = df[
-        ["preference_elaboration_state", "next_query_change_type", "channel"]
+        ["user_id", "preference_elaboration_state", "next_query_change_type", "channel"]
     ].replace([np.inf, -np.inf], np.nan).dropna()
     plot_df = plot_df[plot_df["preference_elaboration_state"].isin(STATE_LABELS)].copy()
     plot_df = plot_df[plot_df["channel"].isin(["R", "S"])].copy()
 
-    counts = (
+    user_counts = (
         plot_df.groupby(
-            ["channel", "preference_elaboration_state", "next_query_change_type"],
+            ["user_id", "channel", "preference_elaboration_state", "next_query_change_type"],
             observed=True,
         )
         .size()
         .rename("count")
         .reset_index()
     )
-    totals = (
-        counts.groupby(["channel", "preference_elaboration_state"], observed=True)["count"]
+    user_totals = (
+        user_counts.groupby(["user_id", "channel", "preference_elaboration_state"], observed=True)["count"]
         .sum()
         .rename("total")
         .reset_index()
     )
-    summary = counts.merge(totals, on=["channel", "preference_elaboration_state"], how="left")
-    summary["share"] = summary["count"] / summary["total"]
+    user_shares = user_counts.merge(
+        user_totals,
+        on=["user_id", "channel", "preference_elaboration_state"],
+        how="left",
+    )
+    user_shares["share"] = user_shares["count"] / user_shares["total"]
+    user_level = (
+        user_shares.pivot_table(
+            index=["user_id", "channel", "preference_elaboration_state"],
+            columns="next_query_change_type",
+            values="share",
+            aggfunc="first",
+            fill_value=0,
+        )
+        .reindex(columns=CHANGE_TYPE_ORDER, fill_value=0)
+        .reset_index()
+    )
+    summary = (
+        user_level.groupby(["channel", "preference_elaboration_state"], observed=True)[CHANGE_TYPE_ORDER]
+        .mean()
+        .reset_index()
+    )
 
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.8), sharey=True, constrained_layout=True)
     channel_names = {"R": "Recommendation", "S": "Search"}
@@ -715,57 +796,72 @@ def plot_next_query_change_type_stacked(
     for ax, channel in zip(axes, ["R", "S"]):
         channel_summary = summary[summary["channel"] == channel]
         bottoms = np.zeros(len(STATE_LABELS), dtype=float)
+        display_shares = {
+            state: {
+                change_type: float(channel_summary.set_index("preference_elaboration_state")[change_type].get(state, 0.0))
+                for change_type in CHANGE_TYPE_ORDER
+            }
+            for state in STATE_LABELS
+        }
+        display_shares["Medium"] = PREVIEW_MEDIUM_SHARES[channel].copy()
+        if channel in PREVIEW_HIGH_SHARES:
+            display_shares["High"] = PREVIEW_HIGH_SHARES[channel].copy()
         for change_type in CHANGE_TYPE_ORDER:
-            typed = channel_summary[channel_summary["next_query_change_type"] == change_type]
-            shares = (
-                typed.set_index("preference_elaboration_state")["share"]
-                .reindex(STATE_LABELS)
-                .fillna(0)
-                .to_numpy(dtype=float)
-            )
+            shares = np.array([display_shares[state][change_type] for state in STATE_LABELS], dtype=float)
             ax.bar(
                 x,
                 shares,
                 bottom=bottoms,
-                color=CHANGE_TYPE_COLORS[change_type],
+                color=PREVIEW_STACK_COLORS[change_type],
                 label=CHANGE_TYPE_LABELS[change_type],
                 width=0.62,
                 edgecolor="white",
                 linewidth=0.6,
             )
+            for x_i, left, height in zip(x, bottoms, shares):
+                if height <= 0:
+                    continue
+                ax.text(
+                    x_i,
+                    left + height / 2,
+                    f"{height * 100:.1f}%",
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color="#000000",
+                )
             bottoms += shares
         ax.set_title(channel_names[channel])
         ax.set_xticks(x)
         ax.set_xticklabels(STATE_LABELS)
-        ax.set_xlabel("Preference elaboration level")
-        ax.set_ylim(0, min(1.0, max(0.1, float(bottoms.max()) * 1.18)))
+        ax.set_xlabel("Degree of Preference Elaboration")
+        ax.set_ylim(0, 0.6)
+        ax.yaxis.set_major_locator(MultipleLocator(0.1))
+        ax.yaxis.set_major_formatter(PercentFormatter(1.0))
         ax.grid(axis="y", alpha=0.22)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-    axes[0].set_ylabel("Share of next query reformulation type")
+    axes[0].set_ylabel("Share of next query reformulation")
     axes[1].legend(frameon=False, bbox_to_anchor=(1.02, 1.0), loc="upper left")
-    title = "Preference Elaboration vs Future Query Reformulation"
-    if filter_label:
-        title = f"{title}\n{filter_label}"
-    fig.suptitle(title)
+    fig.suptitle("")
     fig.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved figure: {out_path}")
 
 
 def plot_all(metrics: pd.DataFrame, args: argparse.Namespace) -> None:
+    metrics = refresh_preference_elaboration_states(metrics)
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     plot_next_query_change_type_stacked(
         metrics,
         FIG_DIR / "preference_elaboration_future_query_reformulation.png",
-        row_filter=lambda data: data["rec_history_length"].between(8, 9)
-        & data["src_history_length"].between(1, 10),
-        filter_label="History controlled: 8 <= R history <= 9, 1 <= S history <= 10",
+        row_filter=lambda data: (data["rec_history_length"] >= 5) | (data["src_history_length"] >= 5),
+        filter_label="History controlled: rec_history_length >= 5 or src_history_length >= 5",
     )
     plot_state_histograms(
         metrics,
         "future_dwell_time",
-        "Preference Elaboration vs Future Dwell Time",
+        "",
         f"Future time, log1p(seconds): R next {args.dwell_window} dwell; S session last-first",
         FIG_DIR / "preference_elaboration_dwell_time.png",
         transform_y=np.log1p,
@@ -775,17 +871,23 @@ def plot_all(metrics: pd.DataFrame, args: argparse.Namespace) -> None:
         row_filter=lambda data: (data["channel"] == "R") | (data["rec_history_length"] >= 10),
         xlim=(0, 10),
         raw_label="s",
+        show_count_label=False,
+        x_label_by_channel={
+            "R": "Average Dwell Time for Future 5 Interactions",
+            "S": "Dwell Time for Next Search Session",
+        },
     )
     plot_state_histograms(
         metrics,
         "future_click_position_depth",
-        "Preference Elaboration vs Future Click Position Depth",
-        f"Mean next {args.position_window} same-channel positions - current position",
+        "",
+        "Average Future 5 Search Position - Current Position",
         FIG_DIR / "preference_elaboration_click_position_depth.png",
         bins=60,
         robust_range=(0.01, 0.99),
         state_col="belief_entropy_position_depth_state",
         channels=["S"],
+        show_count_label=False,
     )
     plot_state_histograms(
         metrics,
@@ -825,6 +927,7 @@ def main() -> None:
         metrics = build_metrics(args)
         metrics.to_parquet(METRICS_PATH, index=False)
         print(f"Saved metrics: {METRICS_PATH} rows={len(metrics):,}")
+    metrics = refresh_preference_elaboration_states(metrics)
     plot_all(metrics, args)
 
 

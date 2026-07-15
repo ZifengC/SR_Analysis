@@ -20,6 +20,7 @@ Run from the `Analysis/` root:
 /Users/Brodie/miniconda3/bin/python3 6-Behavioral-Validation/script/1-extract-hf-behavioral-signals.py
 /Users/Brodie/miniconda3/bin/python3 6-Behavioral-Validation/script/2-match-step4-behavioral-signals.py
 /Users/Brodie/miniconda3/bin/python3 6-Behavioral-Validation/script/3-behavioral-preference-elaboration-plots.py
+/Users/Brodie/miniconda3/bin/python3 6-Behavioral-Validation/script/4-behavioral-channel-continuation-context-weight.py
 ```
 
 Main extracted data:
@@ -29,6 +30,7 @@ Main extracted data:
 6-Behavioral-Validation/data/clicked_behavior_samples.parquet
 6-Behavioral-Validation/data/final_matched_samples_with_step4.parquet
 6-Behavioral-Validation/data/preference_elaboration_behavioral_metrics.parquet
+6-Behavioral-Validation/data/context_weight_transition_events.parquet
 ```
 
 Matching report:
@@ -86,3 +88,24 @@ over the next at most 10 search sessions, where adjacent query-session embedding
 similarity of at least 0.5 continues the run.
 
 The dwell-time histogram excludes zero or negative `page_time` rows for display.
+
+## Channel Continuation vs Context Weight
+
+`script/4-behavioral-channel-continuation-context-weight.py` aligns the matched
+behavior rows with the PC-SAR mechanism export and derives a per-event context
+weight from the single-sided gate for the current channel:
+
+- recommendation rows use `rec_cross_gate_pos`
+- search rows use `src_cross_gate_pos`
+
+Continuation is defined as two adjacent clicked events from the same user on
+the same channel. Switching is defined as two adjacent clicked events from the
+same user on different channels.
+
+Outputs:
+
+```text
+context_weight_continuation_rate.png
+context_weight_switching_rate.png
+context_weight_transition_type_violin.png
+```
