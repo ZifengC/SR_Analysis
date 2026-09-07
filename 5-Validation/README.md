@@ -123,9 +123,12 @@ full sample-level export
 
 1. 将 sample-level rows 合并为有时间顺序的 search/recommendation events。
 2. 使用未来窗口计算 intent consistency 和 dispersion。
-3. 将 uncertainty、entropy、confidence 分为 Low/Medium/High 状态。
-4. 比较不同状态下的未来行为指标。
-5. 构造 `R->R`、`R->S`、`S->R`、`S->S` transition，并验证 attribution gate。
+3. 计算当前 interaction 的 intent integration rate：对当前 posterior 从高到低
+   累加，统计解释至少 75% posterior mass 所需的 intent 数量，并除以总 intent
+   数。
+4. 将 uncertainty、entropy、confidence 分为 Low/Medium/High 状态。
+5. 比较不同状态下的未来行为指标。
+6. 构造 `R->R`、`R->S`、`S->R`、`S->S` transition，并验证 attribution gate。
 
 ### 输出 CSV 及其来源
 

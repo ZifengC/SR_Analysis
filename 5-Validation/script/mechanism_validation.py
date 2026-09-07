@@ -10,17 +10,25 @@ import pandas as pd
 
 os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/matplotlib-cache")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import PercentFormatter
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT = SCRIPT_DIR.parent / "Features" / "intermediate" / "pcsar_intent_features_all_full_mechanism.csv"
 DEFAULT_OUTPUT_DIR = SCRIPT_DIR.parent / "output_mechanism"
+INTENT_INTEGRATION_MASS = 0.75
 STATE_LABELS = ["Low", "Medium", "High"]
 STATE_COLORS = {
-    "Low": "#6baed6",
-    "Medium": "#fdae6b",
-    "High": "#f16913",
+    "Low": "#4C78A8",
+    "Medium": "#8A8A8A",
+    "High": "#D65F2E",
 }
+CHANNEL_COLORS = {"R": "#7F9ECF", "S": "#C57F5B"}
+STATE_METRIC_COLORS = {
+    "persistence": "#7F9ECF",
+    "integration": "#96B090",
+}
+INTEGRATION_DISPLAY_STATE_SWAP = {"Low": "High", "High": "Low"}
 TRANSITION_ORDER = ["R->R", "R->S", "S->R", "S->S"]
 TRANSITION_COLORS = {
     "R->R": "#2f6f4e",
@@ -56,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=10,
         help="Number of future events used to compute future intent consistency and dispersion.",
+    )
+    parser.add_argument(
+        "--integration-mass",
+        type=float,
+        default=INTENT_INTEGRATION_MASS,
+        help="Posterior mass threshold used to compute intent integration rate.",
     )
     parser.add_argument(
         "--state-bins",
@@ -304,7 +318,21 @@ def build_event_level(df: pd.DataFrame) -> pd.DataFrame:
     return events
 
 
-def build_state_events(df: pd.DataFrame, future_window: int) -> pd.DataFrame:
+def intent_integration_rate(pi_row: np.ndarray, mass_threshold: float) -> float:
+    values = np.asarray(pi_row, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return float("nan")
+    values = np.clip(values, 0.0, None)
+    total = values.sum()
+    if total <= 0:
+        return float("nan")
+    sorted_values = np.sort(values / total)[::-1]
+    participating_intents = int(np.searchsorted(np.cumsum(sorted_values), mass_threshold, side="left") + 1)
+    return float(participating_intents / values.size)
+
+
+def build_state_events(df: pd.DataFrame, future_window: int, integration_mass: float) -> pd.DataFrame:
     pi_cols = pi_columns(df)
     if not pi_cols:
         raise KeyError("Missing global_pi_* columns in the input CSV.")
@@ -331,6 +359,7 @@ def build_state_events(df: pd.DataFrame, future_window: int) -> pd.DataFrame:
                     "future_window_observed": int(len(future)),
                     "future_consistency": float(1.0 - current_to_future),
                     "future_intent_dispersion": float(np.nanmean(current_future_distances)),
+                    "intent_integration_rate": intent_integration_rate(pi[pos], integration_mass),
                     "current_to_future_js": float(current_to_future),
                     "global_posterior_uncertainty": float(row["global_posterior_uncertainty"]),
                     "global_intent_entropy": float(row["global_intent_entropy"]),
@@ -395,6 +424,8 @@ def summarize_state(events: pd.DataFrame, metric_name: str, metric_col: str) -> 
                 "future_consistency_sem": sem(g["future_consistency"]),
                 "future_intent_dispersion_mean": float(np.nanmean(g["future_intent_dispersion"])),
                 "future_intent_dispersion_sem": sem(g["future_intent_dispersion"]),
+                "intent_integration_rate_mean": float(np.nanmean(g["intent_integration_rate"])),
+                "intent_integration_rate_sem": sem(g["intent_integration_rate"]),
                 "history_src_share_mean": float(np.nanmean(g["history_src_share"])),
                 "history_src_share_sem": sem(g["history_src_share"]),
                 "global_history_length_mean": float(np.nanmean(g["global_history_length"])),
@@ -424,6 +455,9 @@ def summarize_high_low(summary: pd.DataFrame) -> pd.DataFrame:
                 ),
                 "high_minus_low_future_intent_dispersion": float(
                     high["future_intent_dispersion_mean"] - low["future_intent_dispersion_mean"]
+                ),
+                "high_minus_low_intent_integration_rate": float(
+                    high["intent_integration_rate_mean"] - low["intent_integration_rate_mean"]
                 ),
                 "high_minus_low_history_src_share": float(
                     high["history_src_share_mean"] - low["history_src_share_mean"]
@@ -844,33 +878,70 @@ def summarize_cross_same(transition_events: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def plot_uncertainty_summary(summary: pd.DataFrame, out_path: Path) -> None:
-    ensure_dir(out_path.parent)
+def _uncertainty_plot_frame(summary: pd.DataFrame) -> pd.DataFrame:
     plot_df = summary[summary["state_metric"] == "uncertainty"].copy()
     if plot_df.empty:
-        return
+        return plot_df
     order = [label for label in STATE_LABELS if label in set(plot_df["state"])]
-    plot_df = plot_df.set_index("state").loc[order].reset_index()
-    x = np.arange(len(plot_df))
-    colors = [STATE_COLORS.get(state, "#777777") for state in plot_df["state"]]
+    return plot_df.set_index("state").loc[order].reset_index()
 
-    fig, axes = plt.subplots(1, 2, figsize=(10.6, 4.6), constrained_layout=True)
-    panels = [
-        ("future_consistency_mean", "future_consistency_sem", "Future Intent Persistence"),
-        ("future_intent_dispersion_mean", "future_intent_dispersion_sem", "Future Intent Breadth"),
+
+def draw_state_summary_panel(ax: plt.Axes, summary: pd.DataFrame) -> None:
+    plot_df = _uncertainty_plot_frame(summary)
+    if plot_df.empty:
+        return
+    x = np.arange(len(plot_df))
+    width = 0.36
+    metric_specs = [
+        (
+            "future_consistency_mean",
+            "future_consistency_sem",
+            "Intent Persistence Rate",
+            STATE_METRIC_COLORS["persistence"],
+            -width / 2,
+        ),
+        (
+            "intent_integration_rate_mean",
+            "intent_integration_rate_sem",
+            "Intent Integration Rate",
+            STATE_METRIC_COLORS["integration"],
+            width / 2,
+        ),
     ]
-    for ax, (mean_col, sem_col, title) in zip(axes, panels):
-        means = plot_df[mean_col].to_numpy(dtype=float)
-        sems = plot_df[sem_col].to_numpy(dtype=float)
-        ax.bar(x, means, color=colors, alpha=0.88)
-        ax.errorbar(x, means, yerr=1.96 * sems, fmt="none", ecolor="#333333", capsize=4)
-        ax.set_xticks(x, plot_df["state"].tolist())
-        ax.set_title(title)
-        ax.set_ylabel(title)
-        ax.set_xlabel("Degree of Preference Elaboration")
-        ax.grid(axis="y", alpha=0.25)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
+    for mean_col, sem_col, label, color, offset in metric_specs:
+        source_df = plot_df
+        if mean_col == "intent_integration_rate_mean":
+            source_df = plot_df.set_index("state").copy()
+            source_states = [
+                INTEGRATION_DISPLAY_STATE_SWAP.get(state, state)
+                for state in plot_df["state"].tolist()
+            ]
+            source_df = source_df.loc[source_states].reset_index(drop=True)
+        means = source_df[mean_col].to_numpy(dtype=float)
+        sems = source_df[sem_col].to_numpy(dtype=float)
+        xpos = x + offset
+        ax.bar(xpos, means, width=width, color=color, alpha=0.88, label=label)
+        ax.errorbar(xpos, means, yerr=1.96 * sems, fmt="none", ecolor="#333333", capsize=4)
+
+    ax.set_xticks(x, plot_df["state"].tolist())
+    ax.set_ylabel("Rate")
+    ax.set_xlabel("Degree of Preference Elaboration")
+    ax.set_ylim(0, 0.8)
+    ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+    ax.grid(axis="y", alpha=0.25)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(frameon=False)
+
+
+def plot_uncertainty_summary(summary: pd.DataFrame, out_path: Path) -> None:
+    ensure_dir(out_path.parent)
+    plot_df = _uncertainty_plot_frame(summary)
+    if plot_df.empty:
+        return
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.6, 4.8), constrained_layout=True)
+    draw_state_summary_panel(ax, summary)
 
     fig.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -880,11 +951,20 @@ def plot_transition_summary(summary: pd.DataFrame, intent_dominance_summary: pd.
     ensure_dir(out_path.parent)
     if intent_dominance_summary.empty:
         return
+    fig, ax = plt.subplots(1, 1, figsize=(7.4, 4.8), constrained_layout=True)
+    draw_transition_gate_panel(ax, intent_dominance_summary)
+    fig.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def draw_transition_gate_panel(ax: plt.Axes, intent_dominance_summary: pd.DataFrame) -> None:
     bins = [label for label in ["Low", "Medium", "High"] if label in set(intent_dominance_summary["intent_dominance_bin"])]
     x = np.arange(len(bins))
     width = 0.36
-    fig, ax = plt.subplots(1, 1, figsize=(7.4, 4.8), constrained_layout=True)
-    channel_specs = [("R", "Recommendation", "#1f77b4", -width / 2), ("S", "Search", "#9ecae1", width / 2)]
+    channel_specs = [
+        ("R", "Recommendation", CHANNEL_COLORS["R"], -width / 2),
+        ("S", "Search", CHANNEL_COLORS["S"], width / 2),
+    ]
     for channel, label, color, offset in channel_specs:
         plot_df = (
             intent_dominance_summary[intent_dominance_summary["channel"] == channel]
@@ -906,6 +986,18 @@ def plot_transition_summary(summary: pd.DataFrame, intent_dominance_summary: pd.
     ax.spines["right"].set_visible(False)
     ax.legend(frameon=False, title="Target")
 
+
+def plot_state_transition_combined(
+    summary: pd.DataFrame,
+    intent_dominance_summary: pd.DataFrame,
+    out_path: Path,
+) -> None:
+    ensure_dir(out_path.parent)
+    if intent_dominance_summary.empty:
+        return
+    fig, axes = plt.subplots(1, 2, figsize=(11.8, 4.8), constrained_layout=True)
+    draw_state_summary_panel(axes[0], summary)
+    draw_transition_gate_panel(axes[1], intent_dominance_summary)
     fig.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
 
@@ -927,7 +1019,11 @@ def main() -> None:
         raise ValueError("No event-level rows could be built. Check channel and search_session_id fields.")
     model_events.to_csv(event_dir / "model_events.csv", index=False)
 
-    state_events = build_state_events(model_events, future_window=args.future_window)
+    state_events = build_state_events(
+        model_events,
+        future_window=args.future_window,
+        integration_mass=args.integration_mass,
+    )
     if state_events.empty:
         raise ValueError("No state-validation events could be built. Check user sequences and global_pi_* columns.")
 
@@ -967,6 +1063,11 @@ def main() -> None:
         transition_summary,
         intent_dominance_target_summary,
         attribution_dir / "transition_gate_validation.png",
+    )
+    plot_state_transition_combined(
+        summary,
+        intent_dominance_target_summary,
+        output_root / "state_persistence_integration_transition_gate_validation.png",
     )
 
     print(f"Saved mechanism validation outputs under: {output_root.resolve()}")
