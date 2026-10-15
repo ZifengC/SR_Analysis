@@ -273,6 +273,93 @@ def event_embedding_matrix(df: pd.DataFrame) -> tuple[np.ndarray, str]:
     return normalize_matrix(emb), source
 
 
+def load_native_event_embeddings(native_root: Path) -> tuple[pd.DataFrame, np.ndarray]:
+    """Load the model-independent text embeddings used by Problem Identification Fig. 4."""
+    events_path = native_root / "1-events.pkl"
+    embeddings_path = native_root / "1-event-embeddings.npy"
+    if not events_path.exists() or not embeddings_path.exists():
+        raise FileNotFoundError(
+            f"Missing native embedding artifacts: {events_path} or {embeddings_path}"
+        )
+    events = pd.read_pickle(events_path).reset_index(drop=True)
+    embeddings = normalize_matrix(np.load(embeddings_path))
+    if len(events) != len(embeddings):
+        raise ValueError(
+            f"Native event/embedding size mismatch: {len(events)} vs {len(embeddings)}"
+        )
+    return events, embeddings
+
+
+def native_event_embedding_matrix(
+    df: pd.DataFrame,
+    native_root: Path,
+) -> tuple[np.ndarray, str]:
+    """Map exported evaluation events to their original query/caption embeddings."""
+    events, embeddings = load_native_event_embeddings(native_root)
+    native = events.copy()
+    native["native_embedding_row"] = np.arange(len(native), dtype=np.int64)
+
+    search = native[native["domain"].eq("S")].dropna(subset=["search_session_id"])
+    search_map = {
+        (int(row.user_id), int(row.search_session_id)): embeddings[int(row.native_embedding_row)]
+        for row in search.itertuples(index=False)
+    }
+
+    recommendation = native[native["domain"].eq("R")].copy()
+    recommendation["item_id"] = recommendation["item_ids"].map(
+        lambda value: int(value[0]) if len(value) else -1
+    )
+    recommendation_map = {
+        (int(row.user_id), int(row.item_id), float(row.timestamp)): embeddings[int(row.native_embedding_row)]
+        for row in recommendation.itertuples(index=False)
+    }
+
+    out = np.zeros((len(df), embeddings.shape[1]), dtype=np.float64)
+    missing = []
+    for pos, row in enumerate(df.itertuples(index=False)):
+        channel = str(row.channel).upper()
+        if channel == "S" and pd.notna(row.search_session_id):
+            key = (int(row.user_id), int(row.search_session_id))
+            vector = search_map.get(key)
+        elif channel == "R" and pd.notna(row.item_id) and pd.notna(row.timestamp):
+            key = (int(row.user_id), int(row.item_id), float(row.timestamp))
+            vector = recommendation_map.get(key)
+        else:
+            key = None
+            vector = None
+        if vector is None:
+            missing.append((channel, key))
+        else:
+            out[pos] = vector
+    if missing:
+        raise ValueError(f"Could not map {len(missing)} evaluation events to native embeddings.")
+    return out, "native_multilingual_minilm_query_for_S_caption_for_R"
+
+
+def build_native_anchor_pool(native_root: Path, users: set[int] | None = None) -> pd.DataFrame:
+    """Return the full original event history with model-independent embeddings."""
+    events, embeddings = load_native_event_embeddings(native_root)
+    if users is not None:
+        mask = events["user_id"].astype(int).isin(users).to_numpy()
+        events = events.loc[mask].copy()
+        embeddings = embeddings[mask]
+    else:
+        events = events.copy()
+    events["channel"] = events["domain"].astype(str).str.upper()
+    events["embedding"] = list(embeddings)
+    events["anchor_embedding_source"] = "native_multilingual_minilm_query_for_S_caption_for_R"
+    return events[
+        [
+            "user_id",
+            "timestamp",
+            "channel",
+            "search_session_id",
+            "embedding",
+            "anchor_embedding_source",
+        ]
+    ].sort_values(["user_id", "timestamp", "channel"], kind="mergesort").reset_index(drop=True)
+
+
 def embedding_maps(df: pd.DataFrame) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray], str]:
     emb, source = event_embedding_matrix(df)
     item_map: dict[int, np.ndarray] = {}

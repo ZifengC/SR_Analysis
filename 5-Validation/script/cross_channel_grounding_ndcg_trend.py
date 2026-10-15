@@ -13,9 +13,11 @@ import matplotlib.pyplot as plt
 from ablation_analysis import (
     VARIANT_COLORS,
     build_step4_anchor_pool,
+    build_native_anchor_pool,
     discover_variant_files,
     ensure_dir,
     event_embedding_matrix,
+    native_event_embedding_matrix,
     prepare_frame,
     sem,
     validate_alignment,
@@ -26,6 +28,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT_ROOT = SCRIPT_DIR.parent
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR.parent / "output_ablation2"
 DEFAULT_STEP4_ROOT = SCRIPT_DIR.parent.parent / "Data" / "Step4"
+DEFAULT_NATIVE_EMBEDDING_ROOT = SCRIPT_DIR.parent.parent / "2-Problem-identify" / "intermediate"
 STATE_VARIANTS = ["full", "no_intent_state"]
 VARIANT_DISPLAY = {
     "full": "PC-SAR",
@@ -43,7 +46,7 @@ SERIES_STYLES = {
 }
 RANK_K = 10
 N_HISTORY = 30
-N_BINS = 8
+N_BINS = 10
 RAW_X_METRIC = "cross_top1_minus_same_top1"
 X_METRIC = RAW_X_METRIC
 X_MEAN = f"{X_METRIC}_mean"
@@ -209,9 +212,15 @@ def build_grounding_events(
     base_df: pd.DataFrame,
     history_window: int,
     step4_root: Path | None = None,
+    native_embedding_root: Path | None = None,
 ) -> pd.DataFrame:
-    event_emb, embedding_source = event_embedding_matrix(base_df)
-    anchor_pool = build_step4_anchor_pool(base_df, step4_root) if step4_root is not None else pd.DataFrame()
+    if native_embedding_root is not None:
+        event_emb, embedding_source = native_event_embedding_matrix(base_df, native_embedding_root)
+        users = set(pd.to_numeric(base_df["user_id"], errors="coerce").dropna().astype(int))
+        anchor_pool = build_native_anchor_pool(native_embedding_root, users=users)
+    else:
+        event_emb, embedding_source = event_embedding_matrix(base_df)
+        anchor_pool = build_step4_anchor_pool(base_df, step4_root) if step4_root is not None else pd.DataFrame()
     if not anchor_pool.empty:
         return build_grounding_events_from_step4_pool(
             base_df=base_df,
@@ -321,7 +330,11 @@ def build_grounding_events_from_step4_pool(
                     "cross_channel_top1_similarity": cross_top1,
                     "same_channel_top1_similarity": same_top1,
                     "embedding_source": history_source,
-                    "history_source": "step4_full_history",
+                    "history_source": (
+                        "native_full_history"
+                        if history_source.startswith("native_")
+                        else "step4_full_history"
+                    ),
                 }
             )
     return pd.DataFrame(rows)
@@ -397,11 +410,11 @@ def attach_grounding_bins(df: pd.DataFrame, bins: int) -> pd.DataFrame:
         .drop_duplicates(key_cols)
         .dropna(subset=[X_METRIC])
     )
-    q = min(int(bins), int(event_bins[X_METRIC].nunique()))
+    q = min(int(bins), len(event_bins))
     if q < 2:
         raise ValueError(f"Not enough unique {X_METRIC} values to build trend bins.")
     event_bins["grounding_bin"] = pd.qcut(
-        event_bins[X_METRIC],
+        event_bins[X_METRIC].rank(method="first"),
         q=q,
         labels=False,
         duplicates="drop",
@@ -696,6 +709,7 @@ def main() -> None:
         base_events_df,
         history_window=args.history_window,
         step4_root=Path(args.step4_root),
+        native_embedding_root=DEFAULT_NATIVE_EMBEDDING_ROOT,
     )
     if grounding_events.empty:
         raise ValueError("No valid cross-channel grounding events were built.")
