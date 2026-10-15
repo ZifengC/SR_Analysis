@@ -158,6 +158,43 @@ def load_problem_identify_events(intermediate_root: Path) -> pd.DataFrame:
     return events.dropna(subset=["elaboration_proxy", "contextualization_proxy"]).copy()
 
 
+def build_fixed10_raw_top5_events(
+    events: pd.DataFrame,
+    intermediate_root: Path,
+) -> pd.DataFrame:
+    source_events = pd.read_pickle(intermediate_root / "1-events.pkl")
+    event_embeddings = np.load(intermediate_root / "1-event-embeddings.npy")
+    if len(source_events) != len(event_embeddings):
+        raise ValueError("Event and embedding caches have different row counts.")
+
+    rows = []
+    for _, group in source_events.groupby("user_id", sort=False):
+        embedding_rows = group["embedding_row"].to_numpy(dtype=int)
+        event_ids = group["event_id"].to_numpy()
+        for position in range(N_HISTORY, len(group)):
+            history_rows = embedding_rows[position - N_HISTORY : position]
+            current_row = embedding_rows[position]
+            similarities = event_embeddings[history_rows] @ event_embeddings[current_row]
+            top5 = np.partition(similarities, -TOP_K)[-TOP_K:]
+            rows.append(
+                {
+                    "event_id": event_ids[position],
+                    "raw_top5_similarity_mean": float(top5.mean()),
+                    "fixed_history_count": N_HISTORY,
+                }
+            )
+
+    raw_top5 = pd.DataFrame(rows)
+    fixed = events.drop(columns=["elaboration_proxy"]).merge(
+        raw_top5,
+        on="event_id",
+        how="inner",
+        validate="one_to_one",
+    )
+    fixed["elaboration_proxy"] = 1.0 - fixed["raw_top5_similarity_mean"]
+    return fixed.dropna(subset=["elaboration_proxy", "contextualization_proxy"]).copy()
+
+
 def summarize_map(events: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for channel, group in events.groupby("channel", sort=False):
@@ -198,16 +235,17 @@ def summarize_spearman(events: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def plot_map(events: pd.DataFrame, out_path: Path) -> None:
+def plot_map(
+    events: pd.DataFrame,
+    out_path: Path,
+    x_label: str = "Preference Elaboration: Focused  →  Rich",
+    scatter_alpha: float = 0.16,
+) -> None:
     ensure_dir(out_path.parent)
-    fig, axes = plt.subplots(1, 2, figsize=(13.8, 6.3), sharex=True, sharey=True, constrained_layout=True)
-    x_values = events["elaboration_proxy"].to_numpy(dtype=float)
+    fig, axes = plt.subplots(1, 2, figsize=(13.8, 6.3), sharey=True, constrained_layout=True)
     y_values = events["contextualization_proxy"].to_numpy(dtype=float)
-    x_low, x_high = np.quantile(x_values, [0.005, 0.995])
     y_abs = np.quantile(np.abs(y_values), 0.995)
-    x_pad = max((x_high - x_low) * 0.06, 0.01)
     y_pad = max(y_abs * 0.08, 0.01)
-    x_limits = (float(x_low - x_pad), float(x_high + x_pad))
     y_limits = (-float(y_abs + y_pad), float(y_abs + y_pad))
     for ax, channel in zip(axes, ["R", "S"]):
         group = events[events["channel"].eq(channel)]
@@ -215,7 +253,7 @@ def plot_map(events: pd.DataFrame, out_path: Path) -> None:
             group["elaboration_proxy"],
             group["contextualization_proxy"],
             s=3,
-            alpha=1.0,
+            alpha=scatter_alpha,
             color=CHANNEL_COLORS[channel],
             edgecolors="none",
             rasterized=True,
@@ -251,14 +289,17 @@ def plot_map(events: pd.DataFrame, out_path: Path) -> None:
         ax.axhline(0.0, color="#202020", linewidth=1.0, alpha=0.7)
         ax.text(0.03, 0.96, f"n = {len(group):,}", transform=ax.transAxes, va="top", fontsize=10)
         ax.set_title(CHANNEL_LABELS[channel])
-        ax.set_xlim(*x_limits)
+        ax.set_xlim(0.0, 2.0 * x_median)
         ax.set_ylim(*y_limits)
         ax.grid(alpha=0.20)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-    axes[0].set_ylabel("Cross-Channel Inspiration (↑) / Within-Channel Continuation (↓)")
-    axes[0].set_xlabel("Preference Elaboration: Focused  →  Rich")
-    axes[1].set_xlabel("Preference Elaboration: Focused  →  Rich")
+    axes[0].set_ylabel(
+        "Preference Contextualization\n"
+        "(Cross-Channel Top-1 Sim. − Same-Channel Top-1 Sim.)"
+    )
+    axes[0].set_xlabel(x_label)
+    axes[1].set_xlabel(x_label)
     fig.savefig(out_path, dpi=240, bbox_inches="tight")
     plt.close(fig)
 
@@ -275,8 +316,35 @@ def main() -> None:
     summary.to_csv(output_root / "preference_construction_behavior_map_summary.csv", index=False)
     correlation.to_csv(output_root / "preference_construction_behavior_map_spearman.csv", index=False)
     plot_map(events, output_root / "preference_construction_behavior_map.png")
+
+    fixed10_events = build_fixed10_raw_top5_events(
+        events,
+        Path(args.problem_intermediate),
+    )
+    fixed10_summary = summarize_map(fixed10_events)
+    fixed10_correlation = summarize_spearman(fixed10_events)
+    fixed10_events.to_csv(
+        output_root / "preference_construction_behavior_map_fixed10_raw_top5_events.csv",
+        index=False,
+    )
+    fixed10_summary.to_csv(
+        output_root / "preference_construction_behavior_map_fixed10_raw_top5_summary.csv",
+        index=False,
+    )
+    fixed10_correlation.to_csv(
+        output_root / "preference_construction_behavior_map_fixed10_raw_top5_spearman.csv",
+        index=False,
+    )
+    plot_map(
+        fixed10_events,
+        output_root / "preference_construction_behavior_map_fixed10_raw_top5.png",
+        x_label="Preference Elaboration (1 − Raw Top-5 Similarity Mean): Focused  →  Rich",
+        scatter_alpha=0.28,
+    )
     print(f"Saved preference construction behavior map under: {output_root.resolve()}")
     print(summary.to_string(index=False))
+    print("\nFixed-10 raw Top-5 variant:")
+    print(fixed10_summary.to_string(index=False))
 
 
 if __name__ == "__main__":

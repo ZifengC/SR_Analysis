@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import pickle
 import warnings
 
@@ -6,6 +7,8 @@ import numpy as np
 import pandas as pd
 
 warnings.filterwarnings('ignore')
+os.environ.setdefault('MPLCONFIGDIR', '/private/tmp/matplotlib-cache')
+os.environ.setdefault('MPLBACKEND', 'Agg')
 
 N_HISTORY = 10
 MIN_HISTORY = 5
@@ -33,8 +36,7 @@ from _shared import ensure_part1_artifacts
 
 
 def load_pickle(path: Path):
-    with path.open('rb') as f:
-        return pickle.load(f)
+    return pd.read_pickle(path)
 
 
 def dump_pickle(obj, path: Path):
@@ -95,10 +97,15 @@ def build_domain_topk_similarity(events, event_emb, n_history=N_HISTORY, min_his
 
 
 def filter_has_both_history(scatter_df):
-    return scatter_df[
+    filtered = scatter_df[
         (scatter_df['search_history_count'] > 0)
         & (scatter_df['recommend_history_count'] > 0)
     ].copy()
+    repeated_same_channel = (
+        (filtered['domain'].eq('R') & np.isclose(filtered['S_r'], 1.0, rtol=0.0, atol=1e-6))
+        | (filtered['domain'].eq('S') & np.isclose(filtered['S_s'], 1.0, rtol=0.0, atol=1e-6))
+    )
+    return filtered[~repeated_same_channel].copy()
 
 
 def summarize_domain_topk(scatter_df):
