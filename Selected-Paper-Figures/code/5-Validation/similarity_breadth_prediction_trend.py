@@ -14,11 +14,9 @@ from matplotlib.ticker import MaxNLocator
 from ablation_analysis import (
     VARIANT_COLORS,
     VARIANT_LABELS,
-    build_step4_anchor_pool,
     build_native_anchor_pool,
     discover_variant_files,
     ensure_dir,
-    event_embedding_matrix,
     native_event_embedding_matrix,
     prepare_frame,
     sem,
@@ -198,13 +196,11 @@ def build_breadth_events(
     step4_root: Path | None = None,
     native_embedding_root: Path | None = None,
 ) -> pd.DataFrame:
-    if native_embedding_root is not None:
-        event_emb, embedding_source = native_event_embedding_matrix(base_df, native_embedding_root)
-        users = set(pd.to_numeric(base_df["user_id"], errors="coerce").dropna().astype(int))
-        anchor_pool = build_native_anchor_pool(native_embedding_root, users=users)
-    else:
-        event_emb, embedding_source = event_embedding_matrix(base_df)
-        anchor_pool = build_step4_anchor_pool(base_df, step4_root) if step4_root is not None else pd.DataFrame()
+    if native_embedding_root is None:
+        raise ValueError("Fig. 7 requires the original MiniLM embedding artifacts.")
+    event_emb, embedding_source = native_event_embedding_matrix(base_df, native_embedding_root)
+    users = set(pd.to_numeric(base_df["user_id"], errors="coerce").dropna().astype(int))
+    anchor_pool = build_native_anchor_pool(native_embedding_root, users=users)
     if not anchor_pool.empty:
         return build_breadth_events_from_step4_pool(
             base_df=base_df,
@@ -358,13 +354,21 @@ def annotate_event_keys(df: pd.DataFrame) -> pd.DataFrame:
     df["channel"] = df["channel"].astype(str).str.upper()
     session = pd.to_numeric(df.get("search_session_id", np.nan), errors="coerce")
     user = pd.to_numeric(df["user_id"], errors="coerce").fillna(-1).astype("int64")
-    row_id = pd.to_numeric(df["_row_id"], errors="coerce").fillna(-1).astype("int64")
+    sample = pd.to_numeric(df["sample_index"], errors="coerce")
+    if sample.isna().any():
+        raise ValueError("sample_index is required for stable event matching.")
+    sample = sample.astype("int64")
     has_session = df["channel"].eq("S") & session.notna()
-    df["_event_key"] = "R:" + row_id.astype(str)
-    df.loc[df["channel"].eq("S"), "_event_key"] = "SROW:" + row_id.astype(str)
+    df["_event_key"] = "R:" + user.astype(str) + ":" + sample.astype(str)
+    df.loc[df["channel"].eq("S"), "_event_key"] = (
+        "SAMPLE:" + user.loc[df["channel"].eq("S")].astype(str) + ":" + sample.loc[df["channel"].eq("S")].astype(str)
+    )
     df.loc[has_session, "_event_key"] = (
         "S:" + user.loc[has_session].astype(str) + ":" + session.loc[has_session].astype("int64").astype(str)
     )
+    recommendation = df[df["channel"].eq("R")]
+    if recommendation["_event_key"].duplicated().any():
+        raise ValueError("Duplicate Recommendation (user_id, sample_index) event keys detected.")
     return df
 
 
